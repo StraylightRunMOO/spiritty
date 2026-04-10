@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spiritty - High-Performance GPU Terminal</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        h1 {
+            color: #00ff88;
+            margin: 0;
+            font-size: 2.5em;
+        }
+        
+        .subtitle {
+            color: #888;
+            margin: 10px 0;
+        }
+        
+        .terminal-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        }
+        
+        .terminal-header {
+            background-color: #333;
+            padding: 10px 15px;
+            border-bottom: 1px solid #555;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .terminal-controls {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .control-btn {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+        }
+        
+        .close-btn { background-color: #ff5f56; }
+        .minimize-btn { background-color: #ffbd2e; }
+        .maximize-btn { background-color: #27ca3f; }
+        
+        .terminal-title {
+            flex: 1;
+            text-align: center;
+            color: #fff;
+            font-size: 14px;
+        }
+        
+        #terminal {
+            width: 100%;
+            height: 500px;
+            background-color: #000;
+        }
+        
+        .controls {
+            max-width: 800px;
+            margin: 20px auto;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            background-color: #333;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        button:hover {
+            background-color: #444;
+        }
+        
+        .info {
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: #222;
+            border-radius: 8px;
+            border: 1px solid #444;
+        }
+        
+        .feature-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .feature {
+            padding: 15px;
+            background-color: #2a2a2a;
+            border-radius: 6px;
+            border: 1px solid #444;
+        }
+        
+        .feature h3 {
+            color: #00ff88;
+            margin: 0 0 10px 0;
+        }
+        
+        .feature p {
+            color: #ccc;
+            margin: 0;
+            font-size: 14px;
+        }
+        
+        .status {
+            max-width: 800px;
+            margin: 10px auto;
+            padding: 10px;
+            background-color: #222;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🕊️ Spiritty</h1>
+        <p class="subtitle">High-Performance GPU-Accelerated Terminal Emulator</p>
+        <p>Inspired by Ghostty • Built with WebGL • ANSI Compatible</p>
+    </div>
+    
+    <div class="terminal-container">
+        <div class="terminal-header">
+            <div class="terminal-controls">
+                <button class="control-btn close-btn" onclick="alert('Close button clicked')"></button>
+                <button class="control-btn minimize-btn" onclick="alert('Minimize button clicked')"></button>
+                <button class="control-btn maximize-btn" onclick="alert('Maximize button clicked')"></button>
+            </div>
+            <div class="terminal-title">Spiritty Terminal</div>
+            <div style="width: 60px;"></div>
+        </div>
+        
+        <div id="terminal"></div>
+    </div>
+    
+    <div class="status" id="status">
+        Status: Ready | GPU: WebGL2 | Font: Monospace 14px | Colors: 16.7M
+    </div>
+    
+    <div class="controls">
+        <button onclick="runDemo()">Run Demo</button>
+        <button onclick="clearTerminal()">Clear</button>
+        <button onclick="testColors()">Test Colors</button>
+        <button onclick="testANSI()">Test ANSI</button>
+        <button onclick="testUnicode()">Test Unicode</button>
+        <button onclick="benchmark()">Benchmark</button>
+    </div>
+    
+    <div class="info">
+        <h2>Features</h2>
+        <div class="feature-list">
+            <div class="feature">
+                <h3>🚀 GPU Acceleration</h3>
+                <p>WebGL-powered rendering for smooth 60fps performance even with massive output</p>
+            </div>
+            <div class="feature">
+                <h3>🎨 True Color Support</h3>
+                <p>Full 24-bit RGB color support with ANSI 256-color and 16-color fallback</p>
+            </div>
+            <div class="feature">
+                <h3>📏 Advanced Text</h3>
+                <p>Bold, italic, underline, strikethrough with proper font rendering</p>
+            </div>
+            <div class="feature">
+                <h3>🖱️ Mouse & Selection</h3>
+                <p>Full mouse support with text selection, copy/paste, and scrolling</p>
+            </div>
+            <div class="feature">
+                <h3>⌨️ Full ANSI Support</h3>
+                <p>Complete VT100/ANSI escape sequence parsing with xterm compatibility</p>
+            </div>
+            <div class="feature">
+                <h3>🌐 Web Native</h3>
+                <p>Designed for the browser with responsive design and touch support</p>
+            </div>
+        </div>
+        
+        <h3>Try It Out</h3>
+        <p>Click "Run Demo" to see Spiritty in action, or type in the terminal above. The terminal supports:</p>
+        <ul>
+            <li><strong>Keyboard:</strong> Arrow keys, Home/End, Page Up/Down</li>
+            <li><strong>Mouse:</strong> Click and drag to select text</li>
+            <li><strong>Copy/Paste:</strong> Ctrl+C/Ctrl+V (or Cmd+C/Cmd+V on Mac)</li>
+            <li><strong>Scrolling:</strong> Mouse wheel or touch gestures</li>
+        </ul>
+    </div>
+
+    <script src="../src/spiritty.js"></script>
+    <script>
+        // Initialize Spiritty terminal
+        const terminal = new Spiritty('terminal', {
+            cols: 80,
+            rows: 24,
+            fontFamily: 'JetBrains Mono, Fira Code, monospace',
+            fontSize: 14,
+            theme: 'dark',
+            cursorBlink: true,
+            gpuAcceleration: true
+        });
+        
+        // Handle terminal data
+        terminal.on('data', (data) => {
+            // Echo back for demo purposes
+            if (data === '\r') {
+                terminal.write('\r\n');
+                terminal.write('> ');
+            } else {
+                terminal.write(data);
+            }
+            
+            updateStatus(`Last input: ${JSON.stringify(data)}`);
+        });
+        
+        // Update status
+        function updateStatus(message) {
+            document.getElementById('status').textContent = 
+                `Status: ${message} | GPU: ${terminal.options.gpuAcceleration ? 'WebGL2' : 'Canvas'} | ` +
+                `Font: ${terminal.options.fontFamily} ${terminal.options.fontSize}px | ` +
+                `Colors: ${terminal.options.gpuAcceleration ? '16.7M' : '256'}`;
+        }
+        
+        // Demo functions
+        function runDemo() {
+            terminal.clear();
+            terminal.write('Welcome to Spiritty!\r\n\r\n');
+            
+            setTimeout(() => {
+                terminal.write('This is a \x1B[31mhigh-performance\x1B[0m GPU-accelerated terminal.\r\n');
+                terminal.write('It supports \x1B[1mbold\x1B[0m, \x1B[3mitalic\x1B[0m, and \x1B[4munderlined\x1B[0m text.\r\n\r\n');
+            }, 500);
+            
+            setTimeout(() => {
+                terminal.write('\x1B[38;2;255;100;100mTrue color support\x1B[0m is built-in!\r\n');
+                terminal.write('\x1B[48;2;0;100;200mBackground colors\x1B[0m work too.\r\n\r\n');
+            }, 1000);
+            
+            setTimeout(() => {
+                terminal.write('The terminal supports all standard ANSI escape sequences.\r\n');
+                terminal.write('Try typing some commands or click the test buttons below!\r\n\r\n');
+                terminal.write('> ');
+            }, 1500);
+            
+            updateStatus('Demo running');
+        }
+        
+        function clearTerminal() {
+            terminal.clear();
+            terminal.write('> ');
+            updateStatus('Terminal cleared');
+        }
+        
+        function testColors() {
+            terminal.write('\r\n');
+            
+            // Standard 16 colors
+            for (let i = 0; i < 16; i++) {
+                terminal.write(`\x1B[${30 + i}mColor ${i}\x1B[0m `);
+                if (i === 7 || i === 15) terminal.write('\r\n');
+            }
+            
+            // 256 colors
+            terminal.write('\r\n256-color palette:\r\n');
+            for (let i = 0; i < 256; i++) {
+                if (i % 16 === 0) terminal.write('\r\n');
+                terminal.write(`\x1B[38;5;${i}m█\x1B[0m`);
+            }
+            
+            terminal.write('\r\n\r\n> ');
+            updateStatus('Color test complete');
+        }
+        
+        function testANSI() {
+            terminal.write('\r\n');
+            
+            // Test cursor movement
+            terminal.write('Testing cursor movement...\r\n');
+            terminal.write('ABC\x1B[2D\x1B[31mX\x1B[0mDEF\r\n');
+            
+            // Test clear line
+            terminal.write('This line will be partially cleared\r\n');
+            terminal.write('1234567890\x1B[5D\x1B[K\r\n');
+            
+            // Test scrolling
+            terminal.write('Line 1\r\n');
+            terminal.write('Line 2\r\n');
+            terminal.write('Line 3\r\n');
+            terminal.write('Line 4\r\n');
+            terminal.write('\x1B[S'); // Scroll up
+            terminal.write('New top line\r\n');
+            
+            terminal.write('\r\n> ');
+            updateStatus('ANSI test complete');
+        }
+        
+        function testUnicode() {
+            terminal.write('\r\n');
+            
+            // Emoji
+            terminal.write('Emoji: 😀 😎 🚀 🐙 🌈\r\n');
+            
+            // Box drawing
+            terminal.write('Box drawing: ┌─┐ │ │ └─┘\r\n');
+            
+            // Mathematical symbols
+            terminal.write('Math: ∑ ∏ ∫ ∂ ∇\r\n');
+            
+            // Currency
+            terminal.write('Currency: $ € £ ¥ ₿\r\n');
+            
+            // Other symbols
+            terminal.write('Symbols: © ® ™ ♠ ♣ ♥ ♦\r\n');
+            
+            terminal.write('\r\n> ');
+            updateStatus('Unicode test complete');
+        }
+        
+        function benchmark() {
+            terminal.write('\r\nRunning benchmark...\r\n');
+            
+            const start = performance.now();
+            const lines = 1000;
+            
+            for (let i = 0; i < lines; i++) {
+                terminal.write(`Benchmark line ${i}: ` + 'x'.repeat(80) + '\r\n');
+            }
+            
+            const end = performance.now();
+            const time = (end - start).toFixed(2);
+            const speed = (lines / (time / 1000)).toFixed(0);
+            
+            terminal.write(`\r\nBenchmark complete: ${lines} lines in ${time}ms (${speed} lines/sec)\r\n`);
+            terminal.write('> ');
+            
+            updateStatus(`Benchmark: ${speed} lines/sec`);
+        }
+        
+        // Initialize with a welcome message
+        setTimeout(() => {
+            terminal.write('Spiritty Terminal Emulator\r\n');
+            terminal.write('Type "help" for available commands\r\n\r\n');
+            terminal.write('> ');
+        }, 100);
+    </script>
+</body>
+</html>
