@@ -1,60 +1,63 @@
-# Spiritty core library
-add_library(spiritty_core STATIC
-    terminal.cpp
-    buffer.cpp
-    ansi_parser.cpp
-    webgl_renderer.cpp
-    selection_manager.cpp
+# Spiritty core — C11. The C++ legacy files are excluded from the build
+# during the Phase 1/2 transition; once the C port is feature-complete
+# they get deleted.
+
+set(SPIRITTY_CORE_SOURCES
+    terminal.c
 )
 
-target_include_directories(spiritty_core PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
-    $<INSTALL_INTERFACE:include>
+add_library(spiritty_core STATIC ${SPIRITTY_CORE_SOURCES})
+
+set_target_properties(spiritty_core PROPERTIES
+    C_STANDARD          11
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS        OFF
+    POSITION_INDEPENDENT_CODE ON
+    C_VISIBILITY_PRESET hidden
 )
 
-# Find OpenGL for native builds
-if(NOT EMSCRIPTEN)
-    find_package(OpenGL REQUIRED)
-endif()
+target_compile_definitions(spiritty_core
+    PRIVATE SPIRITTY_BUILDING=1
+)
+
+target_include_directories(spiritty_core
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+        $<INSTALL_INTERFACE:include>
+)
 
 target_link_libraries(spiritty_core
     PRIVATE
-        nlohmann_json::nlohmann_json
-        $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:OpenGL::GL>
+        spiritty_halyard
+        spiritty_memento
 )
 
-# Set C++ standard
-target_compile_features(spiritty_core PUBLIC cxx_std_17)
-
-# Add compiler flags
 target_compile_options(spiritty_core PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-    $<$<CXX_COMPILER_ID:Clang>:-Wall -Wextra -Wpedantic>
-    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:
+        -Wall -Wextra -Wpedantic -Wshadow
+        -Wstrict-aliasing=2 -Wcast-align -Wnull-dereference
+        -fno-plt
+    >
+    $<$<C_COMPILER_ID:MSVC>:/W4>
 )
 
-# Create main spiritty library
+# Public umbrella target. Consumers link `spiritty`.
 add_library(spiritty INTERFACE)
-
-target_link_libraries(spiritty INTERFACE
-    spiritty_core
-)
-
+target_link_libraries(spiritty INTERFACE spiritty_core)
 target_include_directories(spiritty INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
     $<INSTALL_INTERFACE:include>
 )
 
-# Install headers
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../include/spiritty
-    DESTINATION include
-    FILES_MATCHING PATTERN "*.h"
-)
-
-# Install libraries
 install(TARGETS spiritty_core spiritty
+    EXPORT  spirittyTargets
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin
-    INCLUDES DESTINATION include
+)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../include/spiritty
+    DESTINATION include
+    FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.hpp"
 )

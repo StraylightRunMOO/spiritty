@@ -1,22 +1,12 @@
-# Simple terminal example
-add_executable(simple_terminal simple_terminal.cpp)
-
-target_link_libraries(simple_terminal
-    PRIVATE
-        spiritty
+add_executable(simple_terminal simple_terminal.c)
+target_link_libraries(simple_terminal PRIVATE spiritty)
+set_target_properties(simple_terminal PROPERTIES
+    C_STANDARD          11
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS        OFF
 )
-
-# Set C++ standard
-target_compile_features(simple_terminal PRIVATE cxx_std_17)
-
-# Add compiler flags
 target_compile_options(simple_terminal PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-    $<$<CXX_COMPILER_ID:Clang>:-Wall -Wextra -Wpedantic>
-    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic>
+    $<$<C_COMPILER_ID:MSVC>:/W4>
 )
-
-# Install example
-install(TARGETS simple_terminal
-    RUNTIME DESTINATION bin
-)
+install(TARGETS simple_terminal RUNTIME DESTINATION bin)
