@@ -153,6 +153,9 @@
             this.atlasCursorY = 0;
             this.atlasLineHeight = 0;
             
+            // Cursor blink
+            this.lastCursorBlink = Date.now();
+            
             // Event handlers
             this.eventHandlers = {
                 data: [],
@@ -171,12 +174,31 @@
         init() {
             this.createContainer();
             this.createCanvas();
-            this.initWebGL();
-            this.createShaders();
-            this.createBuffers();
-            this.createTextures();
-            this.createGlyphAtlas();
+            
+            // Try WebGL2; if any part fails, fall back to Canvas 2D
+            try {
+                this.initWebGL();
+                if (this.gl) {
+                    this.createShaders();
+                    this.createBuffers();
+                    this.createTextures();
+                }
+            } catch (e) {
+                console.warn('Spiritty: WebGL initialization failed, falling back to canvas:', e);
+                this.gl = null;
+                if (this.canvas) {
+                    // Clean up partial WebGL state
+                    const gl = this.canvas.getContext('webgl2');
+                    if (gl) {
+                        const ext = gl.getExtension('WEBGL_lose_context');
+                        if (ext) ext.loseContext();
+                    }
+                }
+                this.initCanvas();
+            }
+            
             this.measureFont();
+            this.createGlyphAtlas();
             this.bindEvents();
             this.startRenderLoop();
             
@@ -255,15 +277,13 @@
                 layout(location = 3) in vec4 a_bgColor;
                 
                 uniform mat4 u_projection;
-                uniform vec2 u_cellSize;
                 
                 out vec2 v_texCoord;
                 out vec4 v_color;
                 out vec4 v_bgColor;
                 
                 void main() {
-                    vec2 pos = a_position * u_cellSize;
-                    gl_Position = u_projection * vec4(pos, 0.0, 1.0);
+                    gl_Position = u_projection * vec4(a_position, 0.0, 1.0);
                     v_texCoord = a_texCoord;
                     v_color = a_color;
                     v_bgColor = a_bgColor;
@@ -291,8 +311,8 @@
             `;
             
             // Compile shaders
-            const vertexShader = this.compileShader(gl.VERTEX_SHADER, vertexShaderSource);
-            const fragmentShader = this.compileShader(gl.FRAGMENT_SHADER, fragmentShaderSource);
+            const vertexShader = this.compileShader(this.gl.VERTEX_SHADER, vertexShaderSource);
+            const fragmentShader = this.compileShader(this.gl.FRAGMENT_SHADER, fragmentShaderSource);
             
             // Link program
             this.program = this.linkProgram(vertexShader, fragmentShader);
@@ -300,7 +320,6 @@
             // Get uniform locations
             this.uniforms = {
                 projection: this.gl.getUniformLocation(this.program, 'u_projection'),
-                cellSize: this.gl.getUniformLocation(this.program, 'u_cellSize'),
                 glyphAtlas: this.gl.getUniformLocation(this.program, 'u_glyphAtlas')
             };
             
@@ -334,8 +353,8 @@
                 }
             `;
             
-            const bgVertexShader = this.compileShader(gl.VERTEX_SHADER, bgVertexShaderSource);
-            const bgFragmentShader = this.compileShader(gl.FRAGMENT_SHADER, bgFragmentShaderSource);
+            const bgVertexShader = this.compileShader(this.gl.VERTEX_SHADER, bgVertexShaderSource);
+            const bgFragmentShader = this.compileShader(this.gl.FRAGMENT_SHADER, bgFragmentShaderSource);
             
             this.bgProgram = this.linkProgram(bgVertexShader, bgFragmentShader);
         }
@@ -380,21 +399,21 @@
             this.vbo = this.gl.createBuffer();
             this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vbo);
             
-            // Set up vertex attributes
+            // Set up vertex attributes (stride = 12 floats = 48 bytes)
             // Position (vec2)
-            this.gl.vertexAttribPointer(0, 2, this.gl.FLOAT, false, 10 * 4, 0);
+            this.gl.vertexAttribPointer(0, 2, this.gl.FLOAT, false, 12 * 4, 0);
             this.gl.enableVertexAttribArray(0);
             
             // Texture coordinate (vec2)
-            this.gl.vertexAttribPointer(1, 2, this.gl.FLOAT, false, 10 * 4, 2 * 4);
+            this.gl.vertexAttribPointer(1, 2, this.gl.FLOAT, false, 12 * 4, 2 * 4);
             this.gl.enableVertexAttribArray(1);
             
             // Color (vec4)
-            this.gl.vertexAttribPointer(2, 4, this.gl.FLOAT, false, 10 * 4, 4 * 4);
+            this.gl.vertexAttribPointer(2, 4, this.gl.FLOAT, false, 12 * 4, 4 * 4);
             this.gl.enableVertexAttribArray(2);
             
             // Background color (vec4)
-            this.gl.vertexAttribPointer(3, 4, this.gl.FLOAT, false, 10 * 4, 8 * 4);
+            this.gl.vertexAttribPointer(3, 4, this.gl.FLOAT, false, 12 * 4, 8 * 4);
             this.gl.enableVertexAttribArray(3);
             
             // Create EBO for indices
@@ -426,15 +445,28 @@
         }
 
         createGlyphAtlas() {
-            // Create a simple ASCII atlas
-            const chars = ' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\\\]^_`abcdefghijklmnopqrstuvwxyz{|}~';
+            // Create a simple ASCII atlas by rasterizing glyphs to an offscreen canvas
+            const atlasSize = 1024;
+            const canvas = document.createElement('canvas');
+            canvas.width = atlasSize;
+            canvas.height = atlasSize;
+            const ctx = canvas.getContext('2d');
             
-            // In a real implementation, we'd rasterize glyphs from a font
-            // For this example, we'll just create placeholder entries
+            // Clear to black (transparent in .r channel)
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, atlasSize, atlasSize);
+            ctx.font = `${this.options.fontSize}px ${this.options.fontFamily}`;
+            ctx.textBaseline = 'top';
+            ctx.fillStyle = '#ffffff';
+            
+            const chars = ' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\\\]^_`abcdefghijklmnopqrstuvwxyz{|}~';
             
             for (let i = 0; i < chars.length; i++) {
                 const char = chars[i];
                 const glyphId = this.getGlyphId(char.charCodeAt(0), false, false);
+                
+                // Rasterize glyph
+                ctx.fillText(char, this.atlasCursorX, this.atlasCursorY);
                 
                 this.glyphCache.set(glyphId, {
                     x: this.atlasCursorX,
@@ -449,13 +481,72 @@
                 
                 // Update cursor position
                 this.atlasCursorX += this.cellWidth + 2;
-                if (this.atlasCursorX + this.cellWidth > 1024) {
+                if (this.atlasCursorX + this.cellWidth > atlasSize) {
                     this.atlasCursorX = 0;
                     this.atlasCursorY += this.cellHeight + 2;
                 }
             }
+            
+            // Upload atlas to GPU
+            if (this.gl) {
+                this.gl.bindTexture(this.gl.TEXTURE_2D, this.glyphAtlas);
+                this.gl.texImage2D(this.gl.TEXTURE_2D, 0, this.gl.RGBA, this.gl.RGBA, this.gl.UNSIGNED_BYTE, canvas);
+            }
         }
 
+        ensureGlyph(codepoint, bold, italic) {
+            const glyphId = this.getGlyphId(codepoint, bold, italic);
+            if (this.glyphCache.has(glyphId)) return;
+            
+            // For WebGL, rasterize on demand using an offscreen canvas
+            if (!this.gl) return;
+            
+            const char = String.fromCodePoint(codepoint);
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = this.cellWidth;
+            canvas.height = this.cellHeight;
+            
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, this.cellWidth, this.cellHeight);
+            
+            let fontStyle = '';
+            if (bold) fontStyle += 'bold ';
+            if (italic) fontStyle += 'italic ';
+            ctx.font = `${fontStyle}${this.options.fontSize}px ${this.options.fontFamily}`;
+            ctx.textBaseline = 'top';
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(char, 0, 0);
+            
+            const atlasSize = 1024;
+            if (this.atlasCursorX + this.cellWidth > atlasSize) {
+                this.atlasCursorX = 0;
+                this.atlasCursorY += this.cellHeight + 2;
+            }
+            if (this.atlasCursorY + this.cellHeight > atlasSize) {
+                // Atlas full; overwrite from start
+                this.atlasCursorX = 0;
+                this.atlasCursorY = 0;
+            }
+            
+            this.gl.bindTexture(this.gl.TEXTURE_2D, this.glyphAtlas);
+            this.gl.texSubImage2D(this.gl.TEXTURE_2D, 0, this.atlasCursorX, this.atlasCursorY,
+                                  this.gl.RGBA, this.gl.UNSIGNED_BYTE, canvas);
+            
+            this.glyphCache.set(glyphId, {
+                x: this.atlasCursorX,
+                y: this.atlasCursorY,
+                width: this.cellWidth,
+                height: this.cellHeight,
+                bearingX: 0,
+                bearingY: this.fontMetrics.ascent,
+                advance: this.cellWidth,
+                isColor: false
+            });
+            
+            this.atlasCursorX += this.cellWidth + 2;
+        }
+        
         measureFont() {
             // Create a hidden canvas to measure font metrics
             const canvas = document.createElement('canvas');
@@ -804,7 +895,7 @@
                 
                 for (let col = startCol; col <= endCol; col++) {
                     const cell = line[col];
-                    if (cell.codepoint && cell.codepoint !== ' ') {
+                    if (cell.codepoint && cell.codepoint !== 32) {
                         text += String.fromCodePoint(cell.codepoint);
                     }
                 }
@@ -1050,23 +1141,29 @@
         render() {
             if (this.gl) {
                 this.renderWebGL();
+                // Draw selection and cursor on the 2D overlay
+                const overlayCtx = this.overlayCanvas.getContext('2d');
+                overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
+                this.renderSelection();
+                this.renderCursorCanvas(overlayCtx);
             } else {
                 this.renderCanvas();
             }
         }
 
         renderWebGL() {
-            this.gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            const bg = this.options.colors.background;
+            const r = ((bg >> 16) & 0xFF) / 255;
+            const g = ((bg >> 8) & 0xFF) / 255;
+            const b = (bg & 0xFF) / 255;
+            const a = ((bg >> 24) & 0xFF) / 255;
+            this.gl.clearColor(r, g, b, a);
             this.gl.clear(this.gl.COLOR_BUFFER_BIT);
             
-            // Render background
-            this.renderBackground();
+            this.gl.bindVertexArray(this.vao);
             
-            // Render cells
+            // Render cells (backgrounds are drawn per-cell via the fragment shader)
             this.renderCells();
-            
-            // Render cursor
-            this.renderCursor();
         }
 
         renderBackground() {
@@ -1081,7 +1178,6 @@
         renderCells() {
             this.gl.useProgram(this.program);
             this.gl.uniformMatrix4fv(this.uniforms.projection, false, this.projectionMatrix);
-            this.gl.uniform2f(this.uniforms.cellSize, this.cellWidth, this.cellHeight);
             
             // Bind glyph atlas
             this.gl.activeTexture(this.gl.TEXTURE0);
@@ -1096,7 +1192,9 @@
                 const bufferRow = this.buffer[row];
                 for (let col = 0; col < this.cols; col++) {
                     const cell = bufferRow[col];
-                    if (cell.codepoint) {
+                    const hasContent = cell.codepoint !== 0;
+                    const hasCustomBg = cell.attrs.bgColor !== this.options.colors.background;
+                    if (hasContent || hasCustomBg) {
                         this.renderCell(row - startRow, col, cell);
                     }
                 }
@@ -1108,8 +1206,10 @@
             const x = col * this.cellWidth;
             const y = row * this.cellHeight;
             
-            // Get glyph from atlas
-            const glyphId = this.getGlyphId(cell.codepoint, cell.attrs.bold, cell.attrs.italic);
+            // Get glyph from atlas (use space for empty cells so background still draws)
+            const codepoint = cell.codepoint || 32;
+            const glyphId = this.getGlyphId(codepoint, cell.attrs.bold, cell.attrs.italic);
+            this.ensureGlyph(codepoint, cell.attrs.bold, cell.attrs.italic);
             const glyph = this.glyphCache.get(glyphId);
             
             if (!glyph) return;
@@ -1165,7 +1265,9 @@
                 const bufferRow = this.buffer[row];
                 for (let col = 0; col < this.cols; col++) {
                     const cell = bufferRow[col];
-                    if (cell.codepoint) {
+                    const hasContent = cell.codepoint !== 0;
+                    const hasCustomBg = cell.attrs.bgColor !== this.options.colors.background;
+                    if (hasContent || hasCustomBg) {
                         this.renderCellCanvas(row - startRow, col, cell, ctx);
                     }
                 }
@@ -1186,7 +1288,7 @@
             }
             
             // Text
-            if (cell.codepoint && cell.codepoint !== ' ') {
+            if (cell.codepoint && cell.codepoint !== 32) {
                 ctx.fillStyle = this.colorToCSS(cell.attrs.fgColor);
                 
                 let fontStyle = '';
@@ -1194,7 +1296,7 @@
                 if (cell.attrs.italic) fontStyle += 'italic ';
                 ctx.font = `${fontStyle}${this.options.fontSize}px ${this.options.fontFamily}`;
                 
-                ctx.fillText(String.fromCodePoint(cell.codepoint), x, y + this.fontMetrics.ascent);
+                ctx.fillText(String.fromCodePoint(cell.codepoint), x, y);
             }
         }
 
