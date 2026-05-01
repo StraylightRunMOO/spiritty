@@ -43,6 +43,41 @@
         12: 'brightBlue', 13: 'brightMagenta', 14: 'brightCyan', 15: 'brightWhite'
     };
 
+    // Parse CSS hex color to 32-bit ARGB numeric value
+    function parseColor(color) {
+        if (typeof color === 'number') return color;
+        if (typeof color !== 'string') return 0xFFFFFFFF;
+        let hex = color.replace('#', '');
+        if (hex.length === 3) {
+            hex = hex.split('').map(c => c + c).join('');
+        }
+        if (hex.length === 6) {
+            const r = parseInt(hex.substring(0, 2), 16);
+            const g = parseInt(hex.substring(2, 4), 16);
+            const b = parseInt(hex.substring(4, 6), 16);
+            return (0xFF << 24) | (r << 16) | (g << 8) | b;
+        }
+        if (hex.length === 8) {
+            const a = parseInt(hex.substring(0, 2), 16);
+            const r = parseInt(hex.substring(2, 4), 16);
+            const g = parseInt(hex.substring(4, 6), 16);
+            const b = parseInt(hex.substring(6, 8), 16);
+            return (a << 24) | (r << 16) | (g << 8) | b;
+        }
+        return 0xFFFFFFFF;
+    }
+
+    // Parse rgba() color string
+    function parseRgbaColor(rgba) {
+        const match = rgba.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+        if (!match) return 0xFFFFFFFF;
+        const r = parseInt(match[1]);
+        const g = parseInt(match[2]);
+        const b = parseInt(match[3]);
+        const a = match[4] ? Math.round(parseFloat(match[4]) * 255) : 255;
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    }
+
     /**
      * Spiritty Terminal Class
      */
@@ -57,6 +92,12 @@
             }
 
             this.options = Object.assign({}, DEFAULT_OPTIONS, options);
+            // Convert palette colors to numeric format
+            this.options.colors.foreground = parseColor(this.options.colors.foreground);
+            this.options.colors.background = parseColor(this.options.colors.background);
+            this.options.colors.cursor = parseColor(this.options.colors.cursor);
+            this.options.colors.selection = parseRgbaColor(this.options.colors.selection);
+            this.options.colors.palette = this.options.colors.palette.map(parseColor);
             this.cols = this.options.cols;
             this.rows = this.options.rows;
             
@@ -65,6 +106,8 @@
             this.cursor = { row: 0, col: 0, visible: true, blinkState: true };
             this.selection = { active: false, startRow: 0, startCol: 0, endRow: 0, endCol: 0 };
             this.scrollTop = 0;
+            this.currentAttrs = this.getDefaultCellAttrs();
+            
             this.modes = {
                 insertMode: false,
                 autoWrap: true,
@@ -702,7 +745,19 @@
 
         reset() {
             this.clear();
-            this.modes = Object.assign({}, DEFAULT_MODES);
+            this.currentAttrs = this.getDefaultCellAttrs();
+            this.modes = {
+                insertMode: false,
+                autoWrap: true,
+                originMode: false,
+                cursorVisible: true,
+                cursorBlink: true,
+                reverseVideo: false,
+                newLineMode: false,
+                mouseReporting: false,
+                bracketedPaste: false,
+                focusReporting: false
+            };
             this.queueFullRedraw();
         }
 
@@ -949,7 +1004,7 @@
             
             ctx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
             
-            ctx.fillStyle = this.options.colors.selection;
+            ctx.fillStyle = this.colorToRgba(this.options.colors.selection);
             
             for (let row = normalized.startRow; row <= normalized.endRow; row++) {
                 const startCol = (row === normalized.startRow) ? normalized.startCol : 0;
@@ -1095,7 +1150,7 @@
             const ctx = this.ctx;
             
             // Clear canvas
-            ctx.fillStyle = this.options.colors.background;
+            ctx.fillStyle = this.colorToCSS(this.options.colors.background);
             ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
             
             // Set font
@@ -1134,15 +1189,12 @@
             if (cell.codepoint && cell.codepoint !== ' ') {
                 ctx.fillStyle = this.colorToCSS(cell.attrs.fgColor);
                 
-                if (cell.attrs.bold) {
-                    ctx.font = `bold ${this.options.fontSize}px ${this.options.fontFamily}`;
-                } else if (cell.attrs.italic) {
-                    ctx.font = `italic ${this.options.fontSize}px ${this.options.fontFamily}`;
-                } else {
-                    ctx.font = `${this.options.fontSize}px ${this.options.fontFamily}`;
-                }
+                let fontStyle = '';
+                if (cell.attrs.bold) fontStyle += 'bold ';
+                if (cell.attrs.italic) fontStyle += 'italic ';
+                ctx.font = `${fontStyle}${this.options.fontSize}px ${this.options.fontFamily}`;
                 
-                ctx.fillText(String.fromCodePoint(cell.codepoint), x, y);
+                ctx.fillText(String.fromCodePoint(cell.codepoint), x, y + this.fontMetrics.ascent);
             }
         }
 
@@ -1152,7 +1204,7 @@
             const x = this.cursor.col * this.cellWidth;
             const y = this.cursor.row * this.cellHeight;
             
-            ctx.fillStyle = this.options.colors.cursor;
+            ctx.fillStyle = this.colorToCSS(this.options.colors.cursor);
             
             switch (this.options.cursorStyle) {
                 case 'block':
@@ -1169,15 +1221,11 @@
 
         // Data parsing
         parseData(data) {
-            // Simple parser for demonstration
-            // In a real implementation, this would be a full ANSI parser
-            
             for (let i = 0; i < data.length; i++) {
                 const char = data[i];
                 const code = char.charCodeAt(0);
                 
                 if (code === 27) { // ESC
-                    // Handle escape sequences
                     i = this.parseEscapeSequence(data, i);
                 } else if (code === 13) { // CR
                     this.cursor.col = 0;
@@ -1191,6 +1239,8 @@
                     this.cursor.col = Math.min(this.cols - 1, this.cursor.col + 8 - (this.cursor.col % 8));
                 } else if (code === 8) { // BS
                     this.cursor.col = Math.max(0, this.cursor.col - 1);
+                } else if (code === 7) { // BEL
+                    // Ignore bell
                 } else if (code >= 32) { // Printable
                     this.writeCell(this.cursor.row, this.cursor.col, char);
                     this.cursor.col++;
@@ -1230,23 +1280,78 @@
             let i = start + 2;
             let params = '';
             
-            while (i < data.length && data[i] !== 'm' && data[i] !== 'H' && data[i] !== 'J') {
-                params += data[i];
-                i++;
+            // Collect parameter bytes (0x30-0x3F) and intermediate bytes (0x20-0x2F)
+            while (i < data.length) {
+                const code = data.charCodeAt(i);
+                if ((code >= 0x30 && code <= 0x3F) || (code >= 0x20 && code <= 0x2F)) {
+                    params += data[i];
+                    i++;
+                } else {
+                    break;
+                }
             }
             
             if (i < data.length) {
                 const command = data[i];
                 
-                if (command === 'm') {
-                    // SGR (Select Graphic Rendition)
-                    this.parseSGR(params);
-                } else if (command === 'H') {
-                    // CUP (Cursor Position)
-                    this.parseCUP(params);
-                } else if (command === 'J') {
-                    // ED (Erase in Display)
-                    this.parseED(params);
+                switch (command) {
+                    case 'm': // SGR
+                        this.parseSGR(params);
+                        break;
+                    case 'H': // CUP
+                    case 'f': // HVP
+                        this.parseCUP(params);
+                        break;
+                    case 'J': // ED
+                        this.parseED(params);
+                        break;
+                    case 'K': // EL
+                        this.parseEL(params);
+                        break;
+                    case 'A': // CUU
+                        this.cursor.row = Math.max(0, this.cursor.row - (parseInt(params) || 1));
+                        break;
+                    case 'B': // CUD
+                        this.cursor.row = Math.min(this.rows - 1, this.cursor.row + (parseInt(params) || 1));
+                        break;
+                    case 'C': // CUF
+                        this.cursor.col = Math.min(this.cols - 1, this.cursor.col + (parseInt(params) || 1));
+                        break;
+                    case 'D': // CUB
+                        this.cursor.col = Math.max(0, this.cursor.col - (parseInt(params) || 1));
+                        break;
+                    case 'E': // CNL
+                        this.cursor.row = Math.min(this.rows - 1, this.cursor.row + (parseInt(params) || 1));
+                        this.cursor.col = 0;
+                        break;
+                    case 'F': // CPL
+                        this.cursor.row = Math.max(0, this.cursor.row - (parseInt(params) || 1));
+                        this.cursor.col = 0;
+                        break;
+                    case 'G': // CHA
+                        this.cursor.col = Math.max(0, Math.min(this.cols - 1, (parseInt(params) || 1) - 1));
+                        break;
+                    case 'S': // SU
+                        this.scrollUp(parseInt(params) || 1);
+                        break;
+                    case 'T': // SD
+                        this.scrollDown(parseInt(params) || 1);
+                        break;
+                    case '@': // ICH
+                        this.insertChars(parseInt(params) || 1);
+                        break;
+                    case 'P': // DCH
+                        this.deleteChars(parseInt(params) || 1);
+                        break;
+                    case 'L': // IL
+                        this.insertLines(parseInt(params) || 1);
+                        break;
+                    case 'M': // DL
+                        this.deleteLines(parseInt(params) || 1);
+                        break;
+                    case 'X': // ECH
+                        this.eraseChars(parseInt(params) || 1);
+                        break;
                 }
                 
                 return i;
@@ -1259,44 +1364,90 @@
             // Parse Select Graphic Rendition parameters
             const paramList = params.split(';').map(p => parseInt(p) || 0);
             
-            for (const param of paramList) {
+            for (let i = 0; i < paramList.length; i++) {
+                const param = paramList[i];
                 if (param === 0) {
                     // Reset
                     this.currentAttrs = this.getDefaultCellAttrs();
                 } else if (param === 1) {
-                    // Bold
                     this.currentAttrs.bold = true;
+                } else if (param === 2) {
+                    this.currentAttrs.dim = true;
                 } else if (param === 3) {
-                    // Italic
                     this.currentAttrs.italic = true;
                 } else if (param === 4) {
-                    // Underline
                     this.currentAttrs.underline = true;
+                    this.currentAttrs.underlineStyle = 1;
                 } else if (param === 7) {
-                    // Reverse
                     this.currentAttrs.reverse = true;
                 } else if (param === 9) {
-                    // Strikethrough
                     this.currentAttrs.strikethrough = true;
+                } else if (param === 22) {
+                    this.currentAttrs.bold = false;
+                    this.currentAttrs.dim = false;
+                } else if (param === 23) {
+                    this.currentAttrs.italic = false;
+                } else if (param === 24) {
+                    this.currentAttrs.underline = false;
+                    this.currentAttrs.underlineStyle = 0;
+                } else if (param === 27) {
+                    this.currentAttrs.reverse = false;
+                } else if (param === 29) {
+                    this.currentAttrs.strikethrough = false;
                 } else if (param >= 30 && param <= 37) {
-                    // Foreground colors
                     this.currentAttrs.fgColor = this.options.colors.palette[param - 30];
-                } else if (param === 38) {
-                    // Extended foreground color (24-bit)
-                    // TODO: Parse 24-bit color
+                } else if (param === 38 && paramList[i + 1] === 5) {
+                    // 256-color foreground
+                    this.currentAttrs.fgColor = this.getColor256(paramList[i + 2] || 0);
+                    i += 2;
+                } else if (param === 38 && paramList[i + 1] === 2) {
+                    // 24-bit foreground
+                    const r = paramList[i + 2] || 0;
+                    const g = paramList[i + 3] || 0;
+                    const b = paramList[i + 4] || 0;
+                    this.currentAttrs.fgColor = (0xFF << 24) | (r << 16) | (g << 8) | b;
+                    i += 4;
                 } else if (param === 39) {
-                    // Default foreground
                     this.currentAttrs.fgColor = this.options.colors.foreground;
                 } else if (param >= 40 && param <= 47) {
-                    // Background colors
                     this.currentAttrs.bgColor = this.options.colors.palette[param - 40];
-                } else if (param === 48) {
-                    // Extended background color (24-bit)
-                    // TODO: Parse 24-bit color
+                } else if (param === 48 && paramList[i + 1] === 5) {
+                    // 256-color background
+                    this.currentAttrs.bgColor = this.getColor256(paramList[i + 2] || 0);
+                    i += 2;
+                } else if (param === 48 && paramList[i + 1] === 2) {
+                    // 24-bit background
+                    const r = paramList[i + 2] || 0;
+                    const g = paramList[i + 3] || 0;
+                    const b = paramList[i + 4] || 0;
+                    this.currentAttrs.bgColor = (0xFF << 24) | (r << 16) | (g << 8) | b;
+                    i += 4;
                 } else if (param === 49) {
-                    // Default background
                     this.currentAttrs.bgColor = this.options.colors.background;
+                } else if (param >= 90 && param <= 97) {
+                    // Bright foreground
+                    this.currentAttrs.fgColor = this.options.colors.palette[param - 90 + 8];
+                } else if (param >= 100 && param <= 107) {
+                    // Bright background
+                    this.currentAttrs.bgColor = this.options.colors.palette[param - 100 + 8];
                 }
+            }
+        }
+
+        getColor256(index) {
+            if (index < 16) {
+                return this.options.colors.palette[index];
+            } else if (index < 232) {
+                // 216-color cube
+                const i = index - 16;
+                const r = Math.floor(i / 36) * 51;
+                const g = Math.floor((i % 36) / 6) * 51;
+                const b = (i % 6) * 51;
+                return (0xFF << 24) | (r << 16) | (g << 8) | b;
+            } else {
+                // Grayscale
+                const gray = (index - 232) * 10 + 8;
+                return (0xFF << 24) | (gray << 16) | (gray << 8) | gray;
             }
         }
 
@@ -1308,6 +1459,21 @@
             
             this.cursor.row = Math.max(0, Math.min(row, this.rows - 1));
             this.cursor.col = Math.max(0, Math.min(col, this.cols - 1));
+        }
+
+        parseEL(params) {
+            const param = parseInt(params) || 0;
+            switch (param) {
+                case 0:
+                    this.clearRange(this.cursor.row, this.cursor.col, this.cursor.row, this.cols - 1);
+                    break;
+                case 1:
+                    this.clearRange(this.cursor.row, 0, this.cursor.row, this.cursor.col);
+                    break;
+                case 2:
+                    this.clearRange(this.cursor.row, 0, this.cursor.row, this.cols - 1);
+                    break;
+            }
         }
 
         parseED(params) {
@@ -1332,6 +1498,60 @@
                     this.buffer = this.buffer.slice(-this.rows);
                     break;
             }
+        }
+
+        insertChars(count) {
+            const row = this.cursor.row;
+            const col = this.cursor.col;
+            const line = this.buffer[row];
+            for (let i = this.cols - 1; i >= col + count; i--) {
+                line[i] = Object.assign({}, line[i - count]);
+            }
+            for (let i = col; i < col + count && i < this.cols; i++) {
+                line[i] = this.createCell();
+            }
+            this.markDirty(row);
+        }
+
+        deleteChars(count) {
+            const row = this.cursor.row;
+            const col = this.cursor.col;
+            const line = this.buffer[row];
+            for (let i = col; i < this.cols - count; i++) {
+                line[i] = Object.assign({}, line[i + count]);
+            }
+            for (let i = this.cols - count; i < this.cols; i++) {
+                line[i] = this.createCell();
+            }
+            this.markDirty(row);
+        }
+
+        insertLines(count) {
+            const row = this.cursor.row;
+            for (let i = 0; i < count; i++) {
+                this.buffer.splice(row, 0, this.createLine());
+                this.buffer.pop();
+            }
+            this.queueFullRedraw();
+        }
+
+        deleteLines(count) {
+            const row = this.cursor.row;
+            for (let i = 0; i < count; i++) {
+                this.buffer.splice(row, 1);
+                this.buffer.push(this.createLine());
+            }
+            this.queueFullRedraw();
+        }
+
+        eraseChars(count) {
+            const row = this.cursor.row;
+            const col = this.cursor.col;
+            const line = this.buffer[row];
+            for (let i = col; i < col + count && i < this.cols; i++) {
+                line[i] = this.createCell();
+            }
+            this.markDirty(row);
         }
 
         parseOSCSequence(data, start) {
@@ -1374,7 +1594,8 @@
                 strikethrough: false,
                 dim: false,
                 reverse: false,
-                hidden: false
+                hidden: false,
+                underlineStyle: 0
             };
         }
 
@@ -1464,11 +1685,22 @@
         }
 
         colorToCSS(color) {
-            // Convert hex color to CSS color
+            // Convert numeric ARGB color to CSS color
+            if (typeof color === 'string') return color;
             const r = (color >> 16) & 0xFF;
             const g = (color >> 8) & 0xFF;
             const b = color & 0xFF;
             return `rgb(${r}, ${g}, ${b})`;
+        }
+
+        colorToRgba(color) {
+            // Convert numeric ARGB color to CSS rgba string
+            if (typeof color === 'string') return color;
+            const r = (color >> 16) & 0xFF;
+            const g = (color >> 8) & 0xFF;
+            const b = color & 0xFF;
+            const a = ((color >> 24) & 0xFF) / 255;
+            return `rgba(${r}, ${g}, ${b}, ${a})`;
         }
 
         markDirty(row) {

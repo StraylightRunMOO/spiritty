@@ -7,6 +7,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cstring>
+#include <chrono>
 
 namespace spiritty {
 
@@ -138,9 +139,6 @@ void Terminal::reset() {
     // Reset cursor
     cursor_ = Cursor();
     saved_cursor_ = Cursor();
-    
-    // Reset modes
-    modes_ = TerminalModes();
     
     mark_dirty();
 }
@@ -294,7 +292,7 @@ void Terminal::set_charset(const std::string& charset) {
 }
 
 void Terminal::render() {
-    if (!opened_ || !renderer_) return;
+    if (!opened_ || !renderer_ || !renderer_->initialized()) return;
     
     renderer_->begin_frame();
     renderer_->render();
@@ -338,8 +336,22 @@ void Terminal::handle_mouse_event(int row, int col, int button, bool pressed) {
     }
 }
 
+static std::string event_type_to_string(TerminalEvent::Type type) {
+    switch (type) {
+        case TerminalEvent::DATA: return "data";
+        case TerminalEvent::RESIZE: return "resize";
+        case TerminalEvent::TITLE: return "title";
+        case TerminalEvent::BELL: return "bell";
+        case TerminalEvent::CURSOR_MOVE: return "cursormove";
+        case TerminalEvent::SCROLL: return "scroll";
+        case TerminalEvent::SELECTION_CHANGE: return "selection";
+        case TerminalEvent::MOUSE_EVENT: return "mouse";
+    }
+    return "unknown";
+}
+
 void Terminal::dispatch_event(const TerminalEvent& event) {
-    auto it = event_callbacks_.find(event.type);
+    auto it = event_callbacks_.find(event_type_to_string(event.type));
     if (it != event_callbacks_.end()) {
         for (const auto& callback : it->second) {
             callback(event);

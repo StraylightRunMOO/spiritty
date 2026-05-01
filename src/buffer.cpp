@@ -229,7 +229,7 @@ void TerminalBuffer::resize(int rows, int cols) {
     }
     
     // Ensure viewport is valid
-    viewport_top_ = std::min(viewport_top_, scrollback_.size());
+    viewport_top_ = std::min(viewport_top_, static_cast<int>(scrollback_.size()));
 }
 
 void TerminalBuffer::scroll_up(int count) {
@@ -254,6 +254,10 @@ void TerminalBuffer::scroll_to(int row) {
         viewport_top_ = row;
         mark_all_dirty();
     }
+}
+
+void TerminalBuffer::set_viewport(int top_line) {
+    viewport_top_ = std::max(0, std::min(top_line, static_cast<int>(scrollback_.size())));
 }
 
 void TerminalBuffer::clear() {

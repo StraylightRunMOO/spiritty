@@ -33,7 +33,8 @@ WebGLRenderer::WebGLRenderer(Terminal* terminal)
       cursor_texture_(0),
       frame_count_(0),
       last_frame_time_(0.0),
-      full_redraw_needed_(true) {
+      full_redraw_needed_(true),
+      initialized_(false) {
     
     font_metrics_.ascent = 12;
     font_metrics_.descent = 4;
@@ -68,11 +69,13 @@ bool WebGLRenderer::initialize(const RendererOptions& options) {
     // Set initial viewport
     set_viewport(0, 0, screen_width_, screen_height_);
     
+    initialized_ = true;
     return true;
 }
 
 void WebGLRenderer::shutdown() {
     cleanup_gl_state();
+    initialized_ = false;
 }
 
 void WebGLRenderer::render() {

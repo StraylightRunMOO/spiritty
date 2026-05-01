@@ -15,6 +15,7 @@ int main() {
     options.font_size = 14;
     options.cursor_blink = true;
     options.word_wrap = true;
+    options.gpu_acceleration = false; // Native builds don't have a WebGL context
     
     // Create terminal
     Terminal terminal(options);

@@ -11,8 +11,9 @@ namespace spiritty {
 
 ANSIParser::ANSIParser(Terminal* terminal) 
     : terminal_(terminal), 
-      buffer_(nullptr), // Will be set when terminal is fully initialized
+      buffer_(terminal ? terminal->buffer() : nullptr),
       state_(ParserState::GROUND),
+      private_csi_(false),
       current_gr_(),
       window_title_("Spiritty") {
     init_color_palette();
@@ -25,6 +26,7 @@ void ANSIParser::reset() {
     params_.clear();
     intermediates_.clear();
     osc_string_.clear();
+    private_csi_ = false;
     current_gr_.reset();
     modes_ = TerminalModes();
     saved_cursor_ = SavedCursor();
@@ -46,6 +48,7 @@ void ANSIParser::process_byte(uint8_t byte) {
         case ParserState::GROUND:
             if (byte == 0x1B) { // ESC
                 action = ParserAction::CLEAR;
+                execute_action(action, byte);
                 transition(ParserState::ESCAPE, action);
             } else if (byte >= 0x00 && byte <= 0x1F) { // C0
                 action = ParserAction::EXECUTE;
@@ -59,15 +62,7 @@ void ANSIParser::process_byte(uint8_t byte) {
             break;
             
         case ParserState::ESCAPE:
-            if (byte >= 0x40 && byte <= 0x5F) { // Final character
-                action = ParserAction::ESC_DISPATCH;
-                execute_action(action, byte);
-                transition(ParserState::GROUND, action);
-            } else if (byte >= 0x30 && byte <= 0x3F) { // Intermediate
-                action = ParserAction::COLLECT;
-                execute_action(action, byte);
-                transition(ParserState::ESCAPE_INTERMEDIATE, action);
-            } else if (byte == 0x5B) { // [
+            if (byte == 0x5B) { // [
                 action = ParserAction::CLEAR;
                 transition(ParserState::CSI_ENTRY, action);
             } else if (byte == 0x5D) { // ]
@@ -76,9 +71,17 @@ void ANSIParser::process_byte(uint8_t byte) {
             } else if (byte == 0x50) { // P
                 action = ParserAction::CLEAR;
                 transition(ParserState::DCS_ENTRY, action);
-            } else if (byte >= 0x58 && byte <= 0x5E) { // X, Y, Z, [, \\, ], ^
+            } else if (byte >= 0x58 && byte <= 0x5E) { // X, Y, Z, \\, ^
                 action = ParserAction::HOOK;
                 transition(ParserState::SOS_PM_APC_STRING, action);
+            } else if (byte >= 0x30 && byte <= 0x7E) { // Final character (including DECSC/DECRC)
+                action = ParserAction::ESC_DISPATCH;
+                execute_action(action, byte);
+                transition(ParserState::GROUND, action);
+            } else if (byte >= 0x20 && byte <= 0x2F) { // Intermediate
+                action = ParserAction::COLLECT;
+                execute_action(action, byte);
+                transition(ParserState::ESCAPE_INTERMEDIATE, action);
             } else {
                 // Invalid sequence, return to ground
                 transition(ParserState::GROUND, ParserAction::NONE);
@@ -104,7 +107,10 @@ void ANSIParser::process_byte(uint8_t byte) {
                 action = ParserAction::CSI_DISPATCH;
                 execute_action(action, byte);
                 transition(ParserState::GROUND, action);
-            } else if (byte >= 0x30 && byte <= 0x3F) { // Parameter
+            } else if (byte == 0x3F) { // Private/DEC parameter prefix
+                private_csi_ = true;
+                transition(ParserState::CSI_PARAM, ParserAction::NONE);
+            } else if (byte >= 0x30 && byte <= 0x3E) { // Parameter
                 action = ParserAction::PARAM;
                 execute_action(action, byte);
                 transition(ParserState::CSI_PARAM, action);
@@ -135,7 +141,7 @@ void ANSIParser::process_byte(uint8_t byte) {
                 action = ParserAction::COLLECT;
                 execute_action(action, byte);
                 transition(ParserState::CSI_INTERMEDIATE, action);
-            } else if (byte == 0x3A || (byte >= 0x3C && byte <= 0x3F)) {
+            } else if (byte == 0x3A) {
                 transition(ParserState::CSI_IGNORE, ParserAction::NONE);
             } else {
                 // Invalid sequence
@@ -244,6 +250,7 @@ void ANSIParser::execute_action(ParserAction action, uint8_t byte) {
         case ParserAction::CLEAR:
             clear_params();
             intermediates_.clear();
+            private_csi_ = false;
             break;
         case ParserAction::COLLECT:
             intermediates_ += static_cast<char>(byte);
@@ -518,11 +525,19 @@ void ANSIParser::handle_csi_dispatch(uint8_t byte) {
         case 'g': // TBC - Tab Clear
             csi_tbc(get_param(0, 0));
             break;
-        case 'h': // SM - Set Mode
-            csi_sm(get_param(0, 0));
+        case 'h': // SM - Set Mode / DECSET
+            if (private_csi_) {
+                csi_decset(get_param(0, 0));
+            } else {
+                csi_sm(get_param(0, 0));
+            }
             break;
-        case 'l': // RM - Reset Mode
-            csi_rm(get_param(0, 0));
+        case 'l': // RM - Reset Mode / DECRST
+            if (private_csi_) {
+                csi_decrst(get_param(0, 0));
+            } else {
+                csi_rm(get_param(0, 0));
+            }
             break;
         case 'm': // SGR - Select Graphic Rendition
             csi_sgr(params_);
@@ -634,7 +649,7 @@ void ANSIParser::csi_ed(int param) {
     
     switch (param) {
         case 0: // Clear from cursor to end of screen
-            buffer_->clear_range(row, col, rows_ - 1, cols_ - 1);
+            buffer_->clear_range(row, col, terminal_->rows() - 1, terminal_->cols() - 1);
             break;
         case 1: // Clear from start of screen to cursor
             buffer_->clear_range(0, 0, row, col);
@@ -657,7 +672,7 @@ void ANSIParser::csi_el(int param) {
     
     switch (param) {
         case 0: // Clear from cursor to end of line
-            buffer_->clear_range(row, col, row, cols_ - 1);
+            buffer_->clear_range(row, col, row, terminal_->cols() - 1);
             break;
         case 1: // Clear from start of line to cursor
             buffer_->clear_range(row, 0, row, col);

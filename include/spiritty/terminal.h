@@ -5,6 +5,7 @@
 #include <vector>
 #include <functional>
 #include <cstdint>
+#include <map>
 
 namespace spiritty {
 
@@ -86,6 +87,19 @@ struct CellAttributes {
     
     bool operator!=(const CellAttributes& other) const {
         return !(*this == other);
+    }
+    
+    void reset() {
+        fg_color = 0xFFFFFFFF;
+        bg_color = 0x00000000;
+        bold = false;
+        italic = false;
+        underline = false;
+        strikethrough = false;
+        dim = false;
+        reverse = false;
+        hidden = false;
+        underline_style = 0;
     }
 };
 
@@ -188,12 +202,14 @@ public:
     void render();
     void update_cursor();
     void queue_render();
+    void dispatch_event(const TerminalEvent& event);
     
     // Getters
     int cols() const { return options_.cols; }
     int rows() const { return options_.rows; }
     const Cursor& cursor() const { return cursor_; }
     const Selection& selection() const { return selection_; }
+    TerminalOptions& options() { return options_; }
     const TerminalOptions& options() const { return options_; }
     
     // JavaScript bridge methods
@@ -208,6 +224,12 @@ private:
     TerminalOptions options_;
     std::unique_ptr<TerminalBuffer> buffer_;
     std::unique_ptr<ANSIParser> parser_;
+    
+public:
+    TerminalBuffer* buffer() { return buffer_.get(); }
+    const TerminalBuffer* buffer() const { return buffer_.get(); }
+    
+private:
     std::unique_ptr<WebGLRenderer> renderer_;
     std::unique_ptr<SelectionManager> selection_manager_;
     
@@ -231,8 +253,8 @@ private:
     void update_scroll_region();
     void handle_mouse_event(int row, int col, int button, bool pressed);
     
-    // Event dispatching
-    void dispatch_event(const TerminalEvent& event);
+    // Dirty tracking
+    void mark_dirty();
     
     // Non-copyable
     Terminal(const Terminal&) = delete;

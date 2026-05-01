@@ -61,7 +61,7 @@ private:
 // Scrollback buffer - stores lines that have scrolled off screen
 class ScrollbackBuffer {
 public:
-    explicit ScrollbackBuffer(size_t max_lines);
+    explicit ScrollbackBuffer(size_t max_lines = 10000);
     
     // Line management
     void push_line(std::unique_ptr<TerminalLine> line);

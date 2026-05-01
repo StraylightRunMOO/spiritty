@@ -8,12 +8,19 @@ add_library(spiritty_core STATIC
 )
 
 target_include_directories(spiritty_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+    $<INSTALL_INTERFACE:include>
 )
+
+# Find OpenGL for native builds
+if(NOT EMSCRIPTEN)
+    find_package(OpenGL REQUIRED)
+endif()
 
 target_link_libraries(spiritty_core
     PRIVATE
         nlohmann_json::nlohmann_json
+        $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:OpenGL::GL>
 )
 
 # Set C++ standard
@@ -46,16 +53,8 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../include/spiritty
 
 # Install libraries
 install(TARGETS spiritty_core spiritty
-    EXPORT spiritty-targets
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin
     INCLUDES DESTINATION include
-)
-
-# Export targets
-install(EXPORT spiritty-targets
-    FILE spiritty-targets.cmake
-    NAMESPACE spiritty::
-    DESTINATION lib/cmake/spiritty
 )

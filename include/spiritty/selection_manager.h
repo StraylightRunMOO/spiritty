@@ -190,6 +190,8 @@ private:
     bool is_word_character(char32_t ch) const;
     bool is_line_break_character(char32_t ch) const;
     bool is_whitespace(char32_t ch) const;
+    bool is_double_click() const;
+    bool is_triple_click() const;
     
     void normalize_word_selection();
     void normalize_line_selection();

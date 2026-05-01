@@ -158,6 +158,9 @@ public:
     void save_terminal_state();
     void restore_terminal_state();
 
+    // Color parsing
+    uint32_t parse_color_from_string(const std::string& str);
+
 private:
     Terminal* terminal_;
     TerminalBuffer* buffer_;
@@ -170,6 +173,7 @@ private:
     std::vector<int> params_;
     std::string intermediates_;
     std::string osc_string_;
+    bool private_csi_;
     
     // Current modes
     TerminalModes modes_;
@@ -205,14 +209,18 @@ private:
     std::array<std::string, 4> charsets_;
     
     // Parser helpers
+    void process_byte(uint8_t byte);
     void transition(ParserState new_state, ParserAction action);
     void execute_action(ParserAction action, uint8_t byte);
+    void handle_print(uint8_t byte);
     
     // Sequence handlers
     void handle_c0(uint8_t ch);
     void handle_c1(uint8_t ch);
     void handle_esc();
+    void handle_esc_dispatch(uint8_t byte);
     void handle_csi();
+    void handle_csi_dispatch(uint8_t byte);
     void handle_dcs();
     void handle_osc();
     void handle_sos_pm_apc();

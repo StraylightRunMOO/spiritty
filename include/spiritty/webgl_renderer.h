@@ -5,6 +5,7 @@
 #include <memory>
 #include <cstdint>
 #include <functional>
+#include <unordered_map>
 #include <GLES3/gl3.h>
 #include "terminal.h"
 
@@ -60,6 +61,7 @@ public:
     // Initialization
     bool initialize(const RendererOptions& options);
     void shutdown();
+    bool initialized() const { return initialized_; }
     
     // Rendering
     void render();
@@ -216,13 +218,14 @@ private:
     // Dirty tracking
     std::vector<bool> dirty_lines_;
     bool full_redraw_needed_;
+    bool initialized_;
     
     // Performance counters
     uint64_t frame_count_;
     double last_frame_time_;
     
     // Private methods
-    void setup_gl_state();
+    bool setup_gl_state();
     void cleanup_gl_state();
     
     void create_glyph_atlas_texture();
@@ -235,7 +238,6 @@ private:
     void update_background_texture_region(int start_row, int end_row);
     
     void create_cursor_texture();
-    void update_cursor_texture();
     
     void upload_vertices();
     void upload_indices();

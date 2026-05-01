@@ -3,12 +3,13 @@
 #include "spiritty/buffer.h"
 #include <algorithm>
 #include <sstream>
+#include <iostream>
 
 namespace spiritty {
 
 SelectionManager::SelectionManager(Terminal* terminal)
     : terminal_(terminal),
-      buffer_(nullptr),
+      buffer_(terminal ? terminal->buffer() : nullptr),
       selection_mode_(SelectionMode::NORMAL),
       selecting_(false),
       selection_start_row_(0),
@@ -229,6 +230,9 @@ void SelectionManager::extend_selection(int row, int col) {
     selection_end_row_ = row;
     selection_end_col_ = col;
     
+    selection_.end_row = row;
+    selection_.end_col = col;
+    
     update_selection_highlight();
     notify_selection_changed();
 }
@@ -362,6 +366,7 @@ void SelectionManager::highlight_selection() {
             Cell& cell = line.cell(col);
             // Apply selection background color
             cell.attrs.bg_color = config_.selection_background_color;
+            (void)cell;
             line.mark_dirty();
         }
     }
