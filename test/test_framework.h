@@ -1,13 +1,19 @@
 /*
- * Minimal C11 test framework. Header-only. No external deps.
+ * Minimal C11 test framework. Header-only API; storage definitions live in
+ * the TU that defines SP_TEST_FRAMEWORK_IMPL before including this header
+ * (typically test_main.c).
  *
  * Usage:
  *   #include "test_framework.h"
- *   SP_TEST(category, name) { ... ASSERT_EQ(a, b); ... }
+ *   SP_TEST(category, name) { ... ASSERT_EQ_INT(a, b); ... }
+ *
+ *   // exactly one TU:
+ *   #define SP_TEST_FRAMEWORK_IMPL
+ *   #include "test_framework.h"
  *   int main(void) { return sp_run_all_tests(); }
  *
  * Tests register themselves at static-init time via constructor attrs.
- * GCC, Clang, and MSVC all support the relevant ctors.
+ * GCC/Clang only — that's what we target.
  */
 #ifndef SPIRITTY_TEST_FRAMEWORK_H
 #define SPIRITTY_TEST_FRAMEWORK_H
@@ -22,8 +28,8 @@
 #include <string.h>
 
 #if defined(__GNUC__) || defined(__clang__)
-#  define SP_TEST_CTOR __attribute__((constructor))
-#  define SP_TEST_UNUSED __attribute__((unused))
+#  define SP_TEST_CTOR    __attribute__((constructor))
+#  define SP_TEST_UNUSED  __attribute__((unused))
 #else
 #  define SP_TEST_CTOR
 #  define SP_TEST_UNUSED
@@ -40,26 +46,22 @@ typedef struct sp_test_case {
 #  define SP_TEST_MAX 1024
 #endif
 
-static sp_test_case sp_test_registry_[SP_TEST_MAX];
-static size_t       sp_test_count_ = 0;
-static jmp_buf      sp_test_jmp_;
-static const char*  sp_test_fail_msg_ = NULL;
+/* These symbols are defined exactly once, in the TU that sets
+ * SP_TEST_FRAMEWORK_IMPL. Other TUs see only the extern declarations and
+ * call sp_test_register() / SP_FAIL() into them. */
+extern sp_test_case sp_test_registry_[SP_TEST_MAX];
+extern size_t       sp_test_count_;
+extern jmp_buf      sp_test_jmp_;
+extern const char*  sp_test_fail_msg_;
 
-static inline void sp_test_register(const char* name, sp_test_fn fn) {
-    if (sp_test_count_ >= SP_TEST_MAX) {
-        fprintf(stderr, "test framework: SP_TEST_MAX exceeded\n");
-        abort();
-    }
-    sp_test_registry_[sp_test_count_].name = name;
-    sp_test_registry_[sp_test_count_].fn   = fn;
-    sp_test_count_++;
-}
+void sp_test_register(const char* name, sp_test_fn fn);
+int  sp_run_all_tests(void);
 
-#define SP_TEST(category, name)                                            \
-    static void test_##category##_##name##_fn(void);                       \
-    static void SP_TEST_CTOR test_##category##_##name##_reg(void) {        \
-        sp_test_register(#category ":" #name, test_##category##_##name##_fn); \
-    }                                                                      \
+#define SP_TEST(category, name)                                                \
+    static void test_##category##_##name##_fn(void);                           \
+    static void SP_TEST_CTOR test_##category##_##name##_reg(void) {            \
+        sp_test_register(#category ":" #name, test_##category##_##name##_fn);  \
+    }                                                                          \
     static void test_##category##_##name##_fn(void)
 
 #define SP_FAIL(msg)                       \
@@ -123,7 +125,26 @@ static inline void sp_test_register(const char* name, sp_test_fn fn) {
         }                                                                  \
     } while (0)
 
-static inline int sp_run_all_tests(void) {
+/* ---- Storage and run loop (compiled into one TU) ----------------------- */
+
+#ifdef SP_TEST_FRAMEWORK_IMPL
+
+sp_test_case sp_test_registry_[SP_TEST_MAX];
+size_t       sp_test_count_     = 0;
+jmp_buf      sp_test_jmp_;
+const char*  sp_test_fail_msg_  = NULL;
+
+void sp_test_register(const char* name, sp_test_fn fn) {
+    if (sp_test_count_ >= SP_TEST_MAX) {
+        fprintf(stderr, "test framework: SP_TEST_MAX exceeded\n");
+        abort();
+    }
+    sp_test_registry_[sp_test_count_].name = name;
+    sp_test_registry_[sp_test_count_].fn   = fn;
+    sp_test_count_++;
+}
+
+int sp_run_all_tests(void) {
     size_t passed = 0, failed = 0;
     printf("Running %zu tests...\n\n", sp_test_count_);
     for (size_t i = 0; i < sp_test_count_; ++i) {
@@ -135,7 +156,7 @@ static inline int sp_run_all_tests(void) {
             printf("[     OK ] %s\n", tc->name);
             ++passed;
         } else {
-            printf("[ FAILED ] %s — %s\n", tc->name,
+            printf("[ FAILED ] %s -- %s\n", tc->name,
                    sp_test_fail_msg_ ? sp_test_fail_msg_ : "(no message)");
             ++failed;
         }
@@ -146,5 +167,7 @@ static inline int sp_run_all_tests(void) {
     printf("============================================\n");
     return failed == 0 ? 0 : 1;
 }
+
+#endif /* SP_TEST_FRAMEWORK_IMPL */
 
 #endif /* SPIRITTY_TEST_FRAMEWORK_H */

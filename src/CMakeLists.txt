@@ -3,6 +3,9 @@
 # they get deleted.
 
 set(SPIRITTY_CORE_SOURCES
+    buffer.c
+    parser.c
+    selection.c
     terminal.c
 )
 

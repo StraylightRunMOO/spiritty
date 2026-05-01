@@ -1,7 +1,7 @@
 /*
  * internal.h — types shared across core translation units.
  *
- * NOT installed. Public API lives in include/spiritty/*.h.
+ * NOT installed. Public API lives under include/spiritty/.
  */
 #ifndef SPIRITTY_INTERNAL_H
 #define SPIRITTY_INTERNAL_H

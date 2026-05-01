@@ -11,6 +11,10 @@
  * SGR attributes).
  */
 #define SPIRITTY_BUILDING 1
+/* posix_memalign() and aligned_alloc() require feature-test macros on glibc. */
+#ifndef _POSIX_C_SOURCE
+#  define _POSIX_C_SOURCE 200112L
+#endif
 
 #include "internal.h"
 
