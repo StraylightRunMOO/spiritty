@@ -153,6 +153,14 @@ struct sp_terminal {
     bool          cursor_visible;
 
     char          window_title[256];
+
+    /* Render scratch — flattened active screen rebuilt each render call. */
+    sp_cell*      render_scratch;
+    size_t        render_scratch_capacity;
+
+    /* Wall-clock seconds since terminal creation, advanced by the host
+     * via sp_terminal_set_time(). Forwarded to the renderer for iTime. */
+    float         time_seconds;
 };
 
 /* Clamp helper used by parser/selmgr/terminal. */

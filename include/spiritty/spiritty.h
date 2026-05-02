@@ -173,6 +173,7 @@ SPIRITTY_API void sp_terminal_resize(sp_terminal* t, int32_t cols, int32_t rows)
 SPIRITTY_API void sp_terminal_clear(sp_terminal* t);
 SPIRITTY_API void sp_terminal_reset(sp_terminal* t);
 SPIRITTY_API void sp_terminal_render(sp_terminal* t);
+SPIRITTY_API void sp_terminal_set_time(sp_terminal* t, float seconds);
 
 SPIRITTY_API int32_t sp_terminal_cols(const sp_terminal* t);
 SPIRITTY_API int32_t sp_terminal_rows(const sp_terminal* t);

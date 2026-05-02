@@ -68,6 +68,22 @@ struct sp_renderer {
 /* Concrete backend factories. Each lives in its own translation unit and
  * is only linked when the corresponding option is enabled. */
 
+/* Null renderer — always available. Records vtable activity for tests
+ * and serves as a reference implementation of the contract. */
+SPIRITTY_API sp_renderer* sp_renderer_null_create(void);
+SPIRITTY_API void         sp_renderer_null_destroy(sp_renderer* r);
+SPIRITTY_API bool         sp_renderer_null_initialized(const sp_renderer* r);
+SPIRITTY_API uint64_t     sp_renderer_null_begin_frames(const sp_renderer* r);
+SPIRITTY_API uint64_t     sp_renderer_null_end_frames(const sp_renderer* r);
+SPIRITTY_API uint64_t     sp_renderer_null_draw_calls(const sp_renderer* r);
+SPIRITTY_API uint64_t     sp_renderer_null_glyph_uploads(const sp_renderer* r);
+SPIRITTY_API uint64_t     sp_renderer_null_resizes(const sp_renderer* r);
+SPIRITTY_API uint64_t     sp_renderer_null_misordered_draws(const sp_renderer* r);
+SPIRITTY_API size_t       sp_renderer_null_last_cell_count(const sp_renderer* r);
+SPIRITTY_API const char*  sp_renderer_null_last_custom_shader(const sp_renderer* r);
+SPIRITTY_API void         sp_renderer_null_capture_cells(sp_renderer* r, bool enable);
+SPIRITTY_API const sp_cell* sp_renderer_null_captured_cells(const sp_renderer* r);
+
 #if defined(SPIRITTY_HAVE_GL)
 SPIRITTY_API sp_renderer* sp_renderer_gl_create(void);
 SPIRITTY_API void         sp_renderer_gl_destroy(sp_renderer* r);

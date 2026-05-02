@@ -2,14 +2,40 @@
 # during the Phase 1/2 transition; once the C port is feature-complete
 # they get deleted.
 
+include(${CMAKE_SOURCE_DIR}/cmake/EmbedShaders.cmake)
+
+set(SPIRITTY_SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+set(SPIRITTY_SHADER_FILES
+    ${SPIRITTY_SHADER_DIR}/common.glsl
+    ${SPIRITTY_SHADER_DIR}/cell_bg.v.glsl
+    ${SPIRITTY_SHADER_DIR}/cell_bg.f.glsl
+    ${SPIRITTY_SHADER_DIR}/cell_text.v.glsl
+    ${SPIRITTY_SHADER_DIR}/cell_text.f.glsl
+    ${SPIRITTY_SHADER_DIR}/cursor.v.glsl
+    ${SPIRITTY_SHADER_DIR}/cursor.f.glsl
+    ${SPIRITTY_SHADER_DIR}/post.v.glsl
+    ${SPIRITTY_SHADER_DIR}/post.f.glsl
+    ${SPIRITTY_SHADER_DIR}/shadertoy_prefix.glsl
+)
+set(SPIRITTY_SHADERS_EMBED_H ${CMAKE_CURRENT_BINARY_DIR}/shaders_embed.h)
+
+spiritty_embed_shaders(
+    OUTPUT  ${SPIRITTY_SHADERS_EMBED_H}
+    SHADERS ${SPIRITTY_SHADER_FILES}
+)
+
 set(SPIRITTY_CORE_SOURCES
     buffer.c
     parser.c
     selection.c
     terminal.c
+    renderer_null.c
 )
 
-add_library(spiritty_core STATIC ${SPIRITTY_CORE_SOURCES})
+add_library(spiritty_core STATIC
+    ${SPIRITTY_CORE_SOURCES}
+    ${SPIRITTY_SHADERS_EMBED_H}
+)
 
 set_target_properties(spiritty_core PROPERTIES
     C_STANDARD          11
@@ -27,6 +53,8 @@ target_include_directories(spiritty_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 target_link_libraries(spiritty_core

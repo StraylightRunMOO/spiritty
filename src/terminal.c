@@ -93,6 +93,7 @@ void sp_terminal_destroy(sp_terminal* t) {
     sp_selmgr_destroy(t->selmgr);
     sp_parser_destroy(t->parser);
     sp_buffer_destroy(t->buf);
+    free(t->render_scratch);
     free(t);
 }
 
@@ -151,13 +152,64 @@ void sp_terminal_reset(sp_terminal* t) {
     t->default_attrs = sp_default_attrs_from_opts(&t->opts);
 }
 
+/* Flatten the active screen into t->render_scratch in row-major order.
+ * Returns the cell count (cols * rows) on success, 0 on allocation
+ * failure. The returned pointer is owned by the terminal and stays
+ * valid until the next render call or destroy. */
+static size_t sp_terminal_flatten_active(sp_terminal* t) {
+    int32_t cols = sp_buffer_cols(t->buf);
+    int32_t rows = sp_buffer_rows(t->buf);
+    if (cols <= 0 || rows <= 0) return 0;
+
+    size_t needed = (size_t)cols * (size_t)rows;
+    if (needed > t->render_scratch_capacity) {
+        sp_cell* p = (sp_cell*)realloc(t->render_scratch, needed * sizeof(sp_cell));
+        if (!p) return 0;
+        t->render_scratch          = p;
+        t->render_scratch_capacity = needed;
+    }
+    for (int32_t r = 0; r < rows; ++r) {
+        const sp_line* ln = sp_buffer_line_const(t->buf, r);
+        sp_cell* dst = t->render_scratch + (size_t)r * (size_t)cols;
+        if (ln && ln->cells && ln->cols >= cols) {
+            memcpy(dst, ln->cells, (size_t)cols * sizeof(sp_cell));
+        } else if (ln && ln->cells && ln->cols > 0) {
+            memcpy(dst, ln->cells, (size_t)ln->cols * sizeof(sp_cell));
+            memset(dst + ln->cols, 0, (size_t)(cols - ln->cols) * sizeof(sp_cell));
+        } else {
+            memset(dst, 0, (size_t)cols * sizeof(sp_cell));
+        }
+    }
+    return needed;
+}
+
 void sp_terminal_render(sp_terminal* t) {
     if (!t || !t->renderer || !t->renderer->vt) return;
     const sp_renderer_vtbl* v = t->renderer->vt;
+
     if (v->begin_frame) v->begin_frame(t->renderer->self);
-    /* Phase 3 will batch cells; for now we just bracket the frame. */
-    if (v->end_frame)   v->end_frame(t->renderer->self);
+
+    if (v->draw_cells) {
+        size_t n = sp_terminal_flatten_active(t);
+        sp_cell_batch batch = {
+            .cells          = t->render_scratch,
+            .cell_count     = n,
+            .cols           = sp_buffer_cols(t->buf),
+            .rows           = sp_buffer_rows(t->buf),
+            .cursor_row     = t->cursor.row,
+            .cursor_col     = t->cursor.col,
+            .cursor_visible = t->cursor_visible && t->cursor.visible,
+            .time_seconds   = t->time_seconds,
+        };
+        v->draw_cells(t->renderer->self, &batch);
+    }
+
+    if (v->end_frame) v->end_frame(t->renderer->self);
     sp_buffer_clear_dirty(t->buf);
+}
+
+void sp_terminal_set_time(sp_terminal* t, float seconds) {
+    if (t) t->time_seconds = seconds;
 }
 
 int32_t sp_terminal_cols(const sp_terminal* t) {
