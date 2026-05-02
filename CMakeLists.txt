@@ -34,6 +34,24 @@ else()
 endif()
 option(SPIRITTY_BUILD_GL_RENDERER "Build the OpenGL 3.3 native renderer backend" ${_default_gl})
 
+# suspenders.h is Linux-only (io_uring). Default ON when we're on Linux and
+# building the ImGui demo; OFF everywhere else. macOS path stays on the
+# blocking-socket reader thread until we add a kqueue backend to suspenders.h.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT EMSCRIPTEN)
+    set(_default_suspenders ON)
+else()
+    set(_default_suspenders OFF)
+endif()
+option(SPIRITTY_USE_SUSPENDERS
+    "Use suspenders.h coroutines + io_uring for the ImGui demo's network loop (Linux only)"
+    ${_default_suspenders})
+
+if(SPIRITTY_USE_SUSPENDERS AND NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+    message(FATAL_ERROR
+        "SPIRITTY_USE_SUSPENDERS=ON requires Linux (io_uring). "
+        "Disable with -DSPIRITTY_USE_SUSPENDERS=OFF on this platform.")
+endif()
+
 # ---- Dependencies ---------------------------------------------------------
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDependencies.cmake)
 
@@ -54,6 +72,11 @@ if(SPIRITTY_BUILD_IMGUI_DEMO)
 endif()
 
 if(SPIRITTY_BUILD_WASM)
+    if(NOT EMSCRIPTEN)
+        message(FATAL_ERROR
+            "SPIRITTY_BUILD_WASM=ON requires the Emscripten toolchain. "
+            "Configure with -DCMAKE_TOOLCHAIN_FILE=cmake/EmscriptenToolchain.cmake")
+    endif()
     add_subdirectory(bindings)
 endif()
 

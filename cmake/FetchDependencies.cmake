@@ -40,6 +40,17 @@ FetchContent_Declare(
 )
 
 # ---------------------------------------------------------------------------
+# suspenders.h — Linux-only stackful coroutine runtime + io_uring + zero-copy
+# channels + QoS scheduler. Drives the ImGui demo's network loop on Linux.
+# In-house library; macOS support (kqueue backend) deferred post-v1.
+# ---------------------------------------------------------------------------
+FetchContent_Declare(
+    suspenders
+    GIT_REPOSITORY https://github.com/StraylightRunMOO/suspenders.h.git
+    GIT_TAG        master # TODO: pin to commit SHA when first integrated
+)
+
+# ---------------------------------------------------------------------------
 # Dear ImGui — native GUI demo. No upstream CMakeLists, we build the sources
 # manually in apps/imgui_demo/CMakeLists.txt.
 # ---------------------------------------------------------------------------
@@ -120,6 +131,25 @@ if(SPIRITTY_BUILD_IMGUI_DEMO)
         FetchContent_Populate(imgui)
     endif()
     set(SPIRITTY_IMGUI_SOURCE_DIR "${imgui_SOURCE_DIR}" CACHE INTERNAL "")
+
+    # suspenders.h is Linux-only and gated by SPIRITTY_USE_SUSPENDERS. We
+    # populate without MakeAvailable for the same reason as halyard/memento:
+    # its CMakeLists pulls examples/tests we don't want.
+    if(SPIRITTY_USE_SUSPENDERS)
+        FetchContent_GetProperties(suspenders)
+        if(NOT suspenders_POPULATED)
+            FetchContent_Populate(suspenders)
+        endif()
+        add_library(spiritty_suspenders INTERFACE)
+        target_include_directories(spiritty_suspenders INTERFACE
+            "${suspenders_SOURCE_DIR}/include"
+        )
+        # liburing is a hard requirement on Linux; surface a clear error
+        # rather than failing deep inside the demo build.
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(URING REQUIRED IMPORTED_TARGET liburing>=2.0)
+        target_link_libraries(spiritty_suspenders INTERFACE PkgConfig::URING)
+    endif()
 endif()
 
 if(SPIRITTY_FETCH_SHADERS)

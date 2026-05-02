@@ -1,0 +1,18 @@
+{
+  "name": "spiritty",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Spiritty terminal emulator — TypeScript wrapper for the WASM core.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "wasm": "cmake --build ../build-wasm -j"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}

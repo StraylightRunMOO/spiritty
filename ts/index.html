@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spiritty — WASM demo</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #101010;
+        color: #e0e0e0;
+        font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+      }
+      body {
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+      }
+      canvas#spiritty {
+        background: #101010;
+        outline: 1px solid #333;
+        image-rendering: pixelated;
+      }
+      canvas#spiritty:focus { outline-color: #5af; }
+    </style>
+  </head>
+  <body>
+    <canvas id="spiritty" tabindex="0"></canvas>
+    <script type="module" src="/src/index.ts"></script>
+  </body>
+</html>
