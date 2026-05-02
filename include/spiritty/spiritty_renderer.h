@@ -23,6 +23,24 @@ typedef struct {
     uint32_t atlas_size;          /* 0 → backend default */
     bool     premultiplied_alpha;
     bool     antialias;
+
+    /* Specialization knobs. Backends compile distinct program variants
+     * for each combination; these freeze at init() and cannot change
+     * without a shutdown/init cycle. */
+    bool     use_linear_blending;
+    bool     use_linear_correction;  /* requires use_linear_blending */
+    bool     use_display_p3;         /* requires use_linear_blending */
+    bool     use_msdf;
+    bool     has_color_glyphs;
+
+    /* Cell metrics (px). Required by the GL backend for vertex transform.
+     * Both zero → backend picks a sensible default (8x16). */
+    float    cell_width_px;
+    float    cell_height_px;
+
+    /* GL function loader. Pass glfwGetProcAddress / emscripten_webgl_get_proc_address.
+     * Optional for backends that don't need it (null renderer ignores). */
+    void*   (*gl_loader)(const char* name);
 } sp_renderer_opts;
 
 /* A glyph the core asks the renderer to upload into its atlas. */

@@ -32,6 +32,10 @@ set(SPIRITTY_CORE_SOURCES
     renderer_null.c
 )
 
+if(SPIRITTY_BUILD_GL_RENDERER)
+    list(APPEND SPIRITTY_CORE_SOURCES renderer_gl.c)
+endif()
+
 add_library(spiritty_core STATIC
     ${SPIRITTY_CORE_SOURCES}
     ${SPIRITTY_SHADERS_EMBED_H}
@@ -47,7 +51,13 @@ set_target_properties(spiritty_core PROPERTIES
 
 target_compile_definitions(spiritty_core
     PRIVATE SPIRITTY_BUILDING=1
+    $<$<BOOL:${SPIRITTY_BUILD_GL_RENDERER}>:SPIRITTY_HAVE_GL=1>
 )
+
+if(SPIRITTY_BUILD_GL_RENDERER AND NOT EMSCRIPTEN)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(spiritty_core PRIVATE OpenGL::GL)
+endif()
 
 target_include_directories(spiritty_core
     PUBLIC

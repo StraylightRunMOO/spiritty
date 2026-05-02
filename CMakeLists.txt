@@ -27,6 +27,13 @@ option(SPIRITTY_BUILD_WASM       "Build Embind bindings + WASM core" OFF)
 option(SPIRITTY_FETCH_SHADERS    "Fetch the ghostty-shaders pack"    OFF)
 option(SPIRITTY_FUZZ             "Build libFuzzer harnesses"         OFF)
 
+if(EMSCRIPTEN)
+    set(_default_gl OFF)
+else()
+    set(_default_gl ON)
+endif()
+option(SPIRITTY_BUILD_GL_RENDERER "Build the OpenGL 3.3 native renderer backend" ${_default_gl})
+
 # ---- Dependencies ---------------------------------------------------------
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDependencies.cmake)
 

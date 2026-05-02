@@ -257,3 +257,28 @@ SP_TEST(renderer, term_render_drives_full_vtable)   { terminal_render_drives_ful
 SP_TEST(renderer, term_render_passes_cursor_state)  { terminal_render_passes_cursor_state(); }
 SP_TEST(renderer, term_set_custom_shader_forwards)  { terminal_set_custom_shader_forwards_to_renderer(); }
 SP_TEST(renderer, term_render_after_resize)         { terminal_render_after_resize_passes_new_dims(); }
+
+#if defined(SPIRITTY_HAVE_GL)
+/* GL backend smoke test — only validates factory/destroy and that init()
+ * fails gracefully when given a NULL loader. Real init/draw requires a
+ * live GL context which the test runner lacks; the imgui_demo exercises
+ * those paths. */
+static void renderer_gl_factory_create_destroy(void) {
+    sp_renderer* r = sp_renderer_gl_create();
+    ASSERT_TRUE(r != NULL);
+    ASSERT_TRUE(r->vt != NULL);
+    ASSERT_TRUE(r->self != NULL);
+    sp_renderer_gl_destroy(r);
+}
+
+static void renderer_gl_init_rejects_null_loader(void) {
+    sp_renderer* r = sp_renderer_gl_create();
+    sp_renderer_opts o = default_opts();
+    o.gl_loader = NULL;
+    ASSERT_TRUE(!r->vt->init(r->self, &o));
+    sp_renderer_gl_destroy(r);
+}
+
+SP_TEST(renderer_gl, factory_create_destroy)        { renderer_gl_factory_create_destroy(); }
+SP_TEST(renderer_gl, init_rejects_null_loader)      { renderer_gl_init_rejects_null_loader(); }
+#endif

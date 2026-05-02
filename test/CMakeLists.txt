@@ -28,6 +28,10 @@ target_include_directories(spiritty_tests
 
 target_link_libraries(spiritty_tests PRIVATE spiritty)
 
+if(SPIRITTY_BUILD_GL_RENDERER)
+    target_compile_definitions(spiritty_tests PRIVATE SPIRITTY_HAVE_GL=1)
+endif()
+
 target_compile_options(spiritty_tests PRIVATE
     $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:
         -Wall -Wextra -Wpedantic -Wshadow
