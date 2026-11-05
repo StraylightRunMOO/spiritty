@@ -19,6 +19,7 @@
 #include "spiritty/spiritty_renderer.h"
 #include "internal.h"
 #include "shaders_embed.h"
+#include "builtin_font.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -76,6 +77,8 @@ typedef ptrdiff_t     GLsizeiptr;
 #define GL_COMPILE_STATUS         0x8B81
 #define GL_LINK_STATUS            0x8B82
 #define GL_INFO_LOG_LENGTH        0x8B84
+#define GL_UNPACK_ALIGNMENT       0x0CF5
+#define GL_UNSIGNED_INT           0x1405
 
 /* ---- Function pointer table ----------------------------------------- */
 
@@ -137,6 +140,8 @@ typedef void          (*PFN_glBindTexture)(GLenum, GLuint);
 typedef void          (*PFN_glActiveTexture)(GLenum);
 typedef void          (*PFN_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
 typedef void          (*PFN_glTexParameteri)(GLenum, GLenum, GLint);
+typedef void          (*PFN_glPixelStorei)(GLenum, GLint);
+typedef void          (*PFN_glVertexAttribIPointer)(GLuint, GLint, GLenum, GLsizei, const void*);
 
 typedef GLenum        (*PFN_glGetError)(void);
 
@@ -192,6 +197,8 @@ typedef struct {
     PFN_glActiveTexture          ActiveTexture;
     PFN_glTexImage2D             TexImage2D;
     PFN_glTexParameteri          TexParameteri;
+    PFN_glPixelStorei            PixelStorei;
+    PFN_glVertexAttribIPointer   VertexAttribIPointer;
     PFN_glGetError               GetError;
 } sp_gl_api;
 
@@ -251,6 +258,8 @@ static bool sp_gl_load(sp_gl_api* api, void* (*loader)(const char*)) {
     GL_LOAD(api, loader, ActiveTexture);
     GL_LOAD(api, loader, TexImage2D);
     GL_LOAD(api, loader, TexParameteri);
+    GL_LOAD(api, loader, PixelStorei);
+    GL_LOAD(api, loader, VertexAttribIPointer);
     GL_LOAD(api, loader, GetError);
 
     /* The handful we actually depend on for first-frame draw must resolve. */
@@ -285,6 +294,20 @@ typedef struct {
     float r, g, b, a;
 } sp_gl_bg_inst;
 
+/* Per-instance vertex layout for cell_text. Matches cell_text.v.glsl
+ * attribute order exactly (locations 0..7); std140 not in play here, this
+ * is just packed vertex data. */
+typedef struct {
+    float    grid_x, grid_y;        /* loc 0: a_grid_pos       */
+    float    glyph_w, glyph_h;      /* loc 1: a_glyph_size     */
+    float    bearing_x, bearing_y;  /* loc 2: a_glyph_bearing  */
+    float    atlas_x, atlas_y;      /* loc 3: a_atlas_xy       */
+    float    atlas_w, atlas_h;      /* loc 4: a_atlas_wh       */
+    float    fg_r, fg_g, fg_b, fg_a; /* loc 5: a_fg            */
+    float    bg_r, bg_g, bg_b, bg_a; /* loc 6: a_bg            */
+    uint32_t flags;                 /* loc 7: a_flags          */
+} sp_gl_text_inst;
+
 /* ---- Backend state -------------------------------------------------- */
 
 typedef struct {
@@ -297,6 +320,7 @@ typedef struct {
 
     /* Programs */
     GLuint           prog_cell_bg;
+    GLuint           prog_cell_text;
     GLuint           prog_post;
 
     /* Geometry */
@@ -304,7 +328,18 @@ typedef struct {
     GLuint           vbo_cell_bg;
     size_t           vbo_cell_bg_capacity;  /* bytes */
 
+    GLuint           vao_cell_text;
+    GLuint           vbo_cell_text;
+    size_t           vbo_cell_text_capacity; /* bytes */
+
     GLuint           vao_post;              /* empty VAO; verts hardcoded */
+
+    /* Builtin glyph atlas (R8). One row of (1 + 95) cells: column 0 holds
+     * the fallback glyph (hollow box), columns 1..95 hold ASCII 32..126. */
+    GLuint           tex_atlas;
+    int32_t          atlas_w_px;
+    int32_t          atlas_h_px;
+    GLint            text_loc_atlas_size; /* uniform "u_atlas_size_px" */
 
     /* Globals UBO */
     GLuint           ubo_globals;
@@ -495,6 +530,137 @@ static void sp_color_unpack(uint32_t c, float out[4]) {
     out[3] = ((c      ) & 0xFF) / 255.0f;
 }
 
+/* ---- Text pass: builtin atlas + geometry + draw -------------------- */
+
+/* Build a (96 cells * 8 px) wide x 16 px tall R8 atlas from the embedded
+ * VGA bitmap font. Column 0 is the fallback glyph; columns 1..95 are
+ * ASCII 32..126 in order. Bit 7 of each row byte is the leftmost pixel. */
+static bool sp_gl_init_text_atlas(sp_renderer_gl* g) {
+    const int cols  = 1 + SP_BUILTIN_FONT_GLYPH_COUNT;
+    const int cellw = SP_BUILTIN_FONT_CELL_W;
+    const int cellh = SP_BUILTIN_FONT_CELL_H;
+    const int W     = cols * cellw;
+    const int H     = cellh;
+
+    uint8_t* px = (uint8_t*)calloc((size_t)W * (size_t)H, 1);
+    if (!px) return false;
+
+    /* Splat one glyph's 16 rows into atlas region [col_x .. col_x+8]. */
+    #define SP_BUILTIN_BLIT(col_x, glyph_bytes) do {                  \
+        for (int y = 0; y < cellh; ++y) {                             \
+            uint8_t row = (glyph_bytes)[y];                           \
+            uint8_t* dst = px + (size_t)y * (size_t)W + (size_t)(col_x); \
+            for (int x = 0; x < cellw; ++x)                           \
+                dst[x] = (row & (uint8_t)(0x80u >> x)) ? 0xFF : 0x00; \
+        }                                                             \
+    } while (0)
+
+    SP_BUILTIN_BLIT(0, sp_builtin_font_fallback);
+    for (int i = 0; i < SP_BUILTIN_FONT_GLYPH_COUNT; ++i) {
+        SP_BUILTIN_BLIT((i + 1) * cellw, sp_builtin_font_8x16[i]);
+    }
+    #undef SP_BUILTIN_BLIT
+
+    g->atlas_w_px = W;
+    g->atlas_h_px = H;
+
+    g->gl.GenTextures(1, &g->tex_atlas);
+    g->gl.BindTexture(GL_TEXTURE_2D, g->tex_atlas);
+    /* Atlas rows aren't 4-byte aligned; we ship single-byte rows. */
+    g->gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    g->gl.TexImage2D(GL_TEXTURE_2D, 0, GL_R8, W, H, 0, GL_RED, GL_UNSIGNED_BYTE, px);
+    g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    g->gl.PixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    g->gl.BindTexture(GL_TEXTURE_2D, 0);
+
+    free(px);
+    return true;
+}
+
+/* Set up VAO/VBO for the per-instance text attributes (matches the layout
+ * declared in cell_text.v.glsl). Stride covers the whole sp_gl_text_inst
+ * struct; each attribute is fed once per instance. */
+static void sp_gl_init_cell_text_geom(sp_renderer_gl* g) {
+    g->gl.GenVertexArrays(1, &g->vao_cell_text);
+    g->gl.GenBuffers(1, &g->vbo_cell_text);
+    g->gl.BindVertexArray(g->vao_cell_text);
+    g->gl.BindBuffer(GL_ARRAY_BUFFER, g->vbo_cell_text);
+
+    const GLsizei stride = (GLsizei)sizeof(sp_gl_text_inst);
+
+    #define SP_TXATTR_F(loc, n, field) do {                                \
+        g->gl.EnableVertexAttribArray((GLuint)(loc));                      \
+        g->gl.VertexAttribPointer((GLuint)(loc), (n), GL_FLOAT, GL_FALSE,  \
+            stride, (const void*)offsetof(sp_gl_text_inst, field));        \
+        g->gl.VertexAttribDivisor((GLuint)(loc), 1);                       \
+    } while (0)
+
+    SP_TXATTR_F(0, 2, grid_x);
+    SP_TXATTR_F(1, 2, glyph_w);
+    SP_TXATTR_F(2, 2, bearing_x);
+    SP_TXATTR_F(3, 2, atlas_x);
+    SP_TXATTR_F(4, 2, atlas_w);
+    SP_TXATTR_F(5, 4, fg_r);
+    SP_TXATTR_F(6, 4, bg_r);
+    #undef SP_TXATTR_F
+
+    /* Integer attribute path for a_flags. */
+    g->gl.EnableVertexAttribArray(7);
+    g->gl.VertexAttribIPointer(7, 1, GL_UNSIGNED_INT, stride,
+                               (const void*)offsetof(sp_gl_text_inst, flags));
+    g->gl.VertexAttribDivisor(7, 1);
+
+    g->gl.BindVertexArray(0);
+}
+
+/* Pack one text instance per cell whose codepoint is renderable. Returns
+ * the instance count. Codepoints in [32, 126] map straight into the atlas;
+ * everything else falls through to the fallback glyph at column 0 (or is
+ * skipped when codepoint == 0 / space, which is just blank). */
+static size_t sp_gl_pack_text_instances(const sp_renderer_gl* g,
+                                        const sp_cell_batch* batch,
+                                        sp_gl_text_inst* out) {
+    const int cellw = SP_BUILTIN_FONT_CELL_W;
+    const int cellh = SP_BUILTIN_FONT_CELL_H;
+
+    size_t n = 0;
+    for (int32_t r = 0; r < batch->rows; ++r) {
+        for (int32_t c = 0; c < batch->cols; ++c) {
+            const sp_cell* cell = &batch->cells[(size_t)r * (size_t)batch->cols + (size_t)c];
+            uint32_t cp = cell->codepoint;
+            if (cp == 0 || cp == ' ') continue;
+
+            int atlas_col;
+            if (cp >= (uint32_t)SP_BUILTIN_FONT_FIRST_CP &&
+                cp <= (uint32_t)SP_BUILTIN_FONT_LAST_CP) {
+                atlas_col = 1 + (int)(cp - (uint32_t)SP_BUILTIN_FONT_FIRST_CP);
+            } else {
+                atlas_col = 0;  /* fallback hollow box */
+            }
+
+            sp_gl_text_inst* inst = &out[n++];
+            inst->grid_x   = (float)c;
+            inst->grid_y   = (float)r;
+            inst->glyph_w  = (float)cellw;
+            inst->glyph_h  = (float)cellh;
+            inst->bearing_x = 0.0f;
+            inst->bearing_y = 0.0f;
+            inst->atlas_x  = (float)(atlas_col * cellw);
+            inst->atlas_y  = 0.0f;
+            inst->atlas_w  = (float)cellw;
+            inst->atlas_h  = (float)cellh;
+            sp_color_unpack(cell->attrs.fg, &inst->fg_r);
+            sp_color_unpack(cell->attrs.bg, &inst->bg_r);
+            inst->flags    = 0;
+        }
+    }
+    (void)g;
+    return n;
+}
+
 /* Build instance buffer from a cell batch. Returns instance count. */
 static size_t sp_gl_pack_bg_instances(const sp_cell_batch* batch,
                                       uint32_t default_bg,
@@ -533,12 +699,29 @@ static bool gl_init(void* self, const sp_renderer_opts* opts) {
     /* Compile programs. */
     g->prog_cell_bg = sp_gl_build_program(g, sp_shader_cell_bg_v, sp_shader_cell_bg_f, true);
     if (!g->prog_cell_bg) return false;
+    g->prog_cell_text = sp_gl_build_program(g, sp_shader_cell_text_v, sp_shader_cell_text_f, true);
+    if (!g->prog_cell_text) return false;
     g->prog_post    = sp_gl_build_program(g, sp_shader_post_v,    sp_shader_post_f,    false);
     if (!g->prog_post) return false;
 
     /* Geometry. */
     sp_gl_init_cell_bg_geom(g);
+    sp_gl_init_cell_text_geom(g);
     g->gl.GenVertexArrays(1, &g->vao_post);
+
+    /* Builtin glyph atlas. */
+    if (!sp_gl_init_text_atlas(g)) return false;
+
+    /* Bind atlas sampler + cache uniform location. */
+    g->gl.UseProgram(g->prog_cell_text);
+    GLint loc_atlas = g->gl.GetUniformLocation(g->prog_cell_text, "u_atlas");
+    if (loc_atlas >= 0) g->gl.Uniform1i(loc_atlas, 0);
+    g->text_loc_atlas_size = g->gl.GetUniformLocation(g->prog_cell_text, "u_atlas_size_px");
+    if (g->text_loc_atlas_size >= 0) {
+        g->gl.Uniform2f(g->text_loc_atlas_size,
+                        (float)g->atlas_w_px, (float)g->atlas_h_px);
+    }
+    g->gl.UseProgram(0);
 
     /* Globals UBO. */
     g->gl.GenBuffers(1, &g->ubo_globals);
@@ -562,12 +745,16 @@ static bool gl_init(void* self, const sp_renderer_opts* opts) {
 static void gl_shutdown(void* self) {
     sp_renderer_gl* g = (sp_renderer_gl*)self;
     if (!g->initialized) return;
-    if (g->prog_cell_bg) g->gl.DeleteProgram(g->prog_cell_bg);
-    if (g->prog_post)    g->gl.DeleteProgram(g->prog_post);
-    if (g->vbo_cell_bg)  g->gl.DeleteBuffers(1, &g->vbo_cell_bg);
-    if (g->vao_cell_bg)  g->gl.DeleteVertexArrays(1, &g->vao_cell_bg);
-    if (g->vao_post)     g->gl.DeleteVertexArrays(1, &g->vao_post);
-    if (g->ubo_globals)  g->gl.DeleteBuffers(1, &g->ubo_globals);
+    if (g->prog_cell_bg)   g->gl.DeleteProgram(g->prog_cell_bg);
+    if (g->prog_cell_text) g->gl.DeleteProgram(g->prog_cell_text);
+    if (g->prog_post)      g->gl.DeleteProgram(g->prog_post);
+    if (g->vbo_cell_bg)    g->gl.DeleteBuffers(1, &g->vbo_cell_bg);
+    if (g->vao_cell_bg)    g->gl.DeleteVertexArrays(1, &g->vao_cell_bg);
+    if (g->vbo_cell_text)  g->gl.DeleteBuffers(1, &g->vbo_cell_text);
+    if (g->vao_cell_text)  g->gl.DeleteVertexArrays(1, &g->vao_cell_text);
+    if (g->vao_post)       g->gl.DeleteVertexArrays(1, &g->vao_post);
+    if (g->ubo_globals)    g->gl.DeleteBuffers(1, &g->ubo_globals);
+    if (g->tex_atlas)      g->gl.DeleteTextures(1, &g->tex_atlas);
     sp_gl_destroy_scene_fbo(g);
     free(g->custom_post_src);
     memset(g, 0, sizeof(*g));
@@ -634,6 +821,33 @@ static void gl_draw_cells(void* self, const sp_cell_batch* batch) {
         g->gl.UseProgram(0);
     }
     free(inst);
+
+    /* Text pass — one instance per cell with a renderable codepoint. */
+    sp_gl_text_inst* tinst = (sp_gl_text_inst*)malloc(batch->cell_count * sizeof(sp_gl_text_inst));
+    if (!tinst) return;
+    size_t tn = sp_gl_pack_text_instances(g, batch, tinst);
+    if (tn > 0) {
+        size_t bytes = tn * sizeof(sp_gl_text_inst);
+        g->gl.BindBuffer(GL_ARRAY_BUFFER, g->vbo_cell_text);
+        if (bytes > g->vbo_cell_text_capacity) {
+            g->gl.BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)bytes, tinst, GL_DYNAMIC_DRAW);
+            g->vbo_cell_text_capacity = bytes;
+        } else {
+            g->gl.BufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)bytes, tinst);
+        }
+        g->gl.UseProgram(g->prog_cell_text);
+        g->gl.ActiveTexture(GL_TEXTURE0);
+        g->gl.BindTexture(GL_TEXTURE_2D, g->tex_atlas);
+        if (g->text_loc_atlas_size >= 0) {
+            g->gl.Uniform2f(g->text_loc_atlas_size,
+                            (float)g->atlas_w_px, (float)g->atlas_h_px);
+        }
+        g->gl.BindVertexArray(g->vao_cell_text);
+        g->gl.DrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)tn);
+        g->gl.BindVertexArray(0);
+        g->gl.UseProgram(0);
+    }
+    free(tinst);
 }
 
 static void gl_end_frame(void* self) {

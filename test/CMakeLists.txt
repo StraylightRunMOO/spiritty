@@ -39,3 +39,14 @@ target_compile_options(spiritty_tests PRIVATE
 )
 
 add_test(NAME spiritty_tests COMMAND spiritty_tests)
+
+# Standalone perf smoke — built but NOT registered with ctest. Perf
+# numbers are noisy under CI and we don't want them gating PRs. Invoke
+# explicitly with `./build/test/spiritty_perf_smoke`.
+add_executable(spiritty_perf_smoke perf_smoke.c)
+set_target_properties(spiritty_perf_smoke PROPERTIES
+    C_STANDARD          11
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS        OFF
+)
+target_link_libraries(spiritty_perf_smoke PRIVATE spiritty)

@@ -23,6 +23,7 @@
 #include "spiritty/spiritty_renderer.h"
 #include "internal.h"
 #include "shaders_embed.h"
+#include "builtin_font.h"
 
 #include <GLES3/gl3.h>
 #include <emscripten/emscripten.h>
@@ -57,6 +58,19 @@ typedef struct {
     float r, g, b, a;
 } sp_webgl_bg_inst;
 
+/* Per-instance vertex layout for cell_text. Same shape as renderer_gl.c's
+ * sp_gl_text_inst — keep them in sync. */
+typedef struct {
+    float    grid_x, grid_y;
+    float    glyph_w, glyph_h;
+    float    bearing_x, bearing_y;
+    float    atlas_x, atlas_y;
+    float    atlas_w, atlas_h;
+    float    fg_r, fg_g, fg_b, fg_a;
+    float    bg_r, bg_g, bg_b, bg_a;
+    uint32_t flags;
+} sp_webgl_text_inst;
+
 typedef struct {
     sp_renderer_opts opts;
     int32_t          fb_w, fb_h;
@@ -65,11 +79,16 @@ typedef struct {
     bool             in_frame;
 
     GLuint           prog_cell_bg;
+    GLuint           prog_cell_text;
     GLuint           prog_post;
 
     GLuint           vao_cell_bg;
     GLuint           vbo_cell_bg;
     size_t           vbo_cell_bg_capacity;
+
+    GLuint           vao_cell_text;
+    GLuint           vbo_cell_text;
+    size_t           vbo_cell_text_capacity;
 
     GLuint           vao_post;
     GLuint           ubo_globals;
@@ -77,6 +96,12 @@ typedef struct {
     GLuint           fbo_scene;
     GLuint           tex_scene;
     int32_t          tex_scene_w, tex_scene_h;
+
+    /* Builtin glyph atlas (R8); identical layout to the GL backend. */
+    GLuint           tex_atlas;
+    int32_t          atlas_w_px;
+    int32_t          atlas_h_px;
+    GLint            text_loc_atlas_size;
 
     char*            custom_post_src;
 } sp_renderer_webgl;
@@ -280,6 +305,122 @@ static size_t sp_webgl_pack_bg_instances(const sp_cell_batch* batch,
     return n;
 }
 
+/* ---- Text pass: builtin atlas + geometry + draw ---------------------- */
+
+static bool sp_webgl_init_text_atlas(sp_renderer_webgl* g) {
+    const int cols  = 1 + SP_BUILTIN_FONT_GLYPH_COUNT;
+    const int cellw = SP_BUILTIN_FONT_CELL_W;
+    const int cellh = SP_BUILTIN_FONT_CELL_H;
+    const int W     = cols * cellw;
+    const int H     = cellh;
+
+    uint8_t* px = (uint8_t*)calloc((size_t)W * (size_t)H, 1);
+    if (!px) return false;
+
+    #define SP_BUILTIN_BLIT(col_x, glyph_bytes) do {                  \
+        for (int y = 0; y < cellh; ++y) {                             \
+            uint8_t row = (glyph_bytes)[y];                           \
+            uint8_t* dst = px + (size_t)y * (size_t)W + (size_t)(col_x); \
+            for (int x = 0; x < cellw; ++x)                           \
+                dst[x] = (row & (uint8_t)(0x80u >> x)) ? 0xFF : 0x00; \
+        }                                                             \
+    } while (0)
+
+    SP_BUILTIN_BLIT(0, sp_builtin_font_fallback);
+    for (int i = 0; i < SP_BUILTIN_FONT_GLYPH_COUNT; ++i) {
+        SP_BUILTIN_BLIT((i + 1) * cellw, sp_builtin_font_8x16[i]);
+    }
+    #undef SP_BUILTIN_BLIT
+
+    g->atlas_w_px = W;
+    g->atlas_h_px = H;
+
+    glGenTextures(1, &g->tex_atlas);
+    glBindTexture(GL_TEXTURE_2D, g->tex_atlas);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, W, H, 0, GL_RED, GL_UNSIGNED_BYTE, px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    free(px);
+    return true;
+}
+
+static void sp_webgl_init_cell_text_geom(sp_renderer_webgl* g) {
+    glGenVertexArrays(1, &g->vao_cell_text);
+    glGenBuffers(1, &g->vbo_cell_text);
+    glBindVertexArray(g->vao_cell_text);
+    glBindBuffer(GL_ARRAY_BUFFER, g->vbo_cell_text);
+
+    const GLsizei stride = (GLsizei)sizeof(sp_webgl_text_inst);
+
+    #define SP_TXATTR_F(loc, n, field) do {                                  \
+        glEnableVertexAttribArray((GLuint)(loc));                            \
+        glVertexAttribPointer((GLuint)(loc), (n), GL_FLOAT, GL_FALSE,        \
+            stride, (const void*)offsetof(sp_webgl_text_inst, field));       \
+        glVertexAttribDivisor((GLuint)(loc), 1);                             \
+    } while (0)
+
+    SP_TXATTR_F(0, 2, grid_x);
+    SP_TXATTR_F(1, 2, glyph_w);
+    SP_TXATTR_F(2, 2, bearing_x);
+    SP_TXATTR_F(3, 2, atlas_x);
+    SP_TXATTR_F(4, 2, atlas_w);
+    SP_TXATTR_F(5, 4, fg_r);
+    SP_TXATTR_F(6, 4, bg_r);
+    #undef SP_TXATTR_F
+
+    glEnableVertexAttribArray(7);
+    glVertexAttribIPointer(7, 1, GL_UNSIGNED_INT, stride,
+                           (const void*)offsetof(sp_webgl_text_inst, flags));
+    glVertexAttribDivisor(7, 1);
+
+    glBindVertexArray(0);
+}
+
+static size_t sp_webgl_pack_text_instances(const sp_cell_batch* batch,
+                                           sp_webgl_text_inst* out) {
+    const int cellw = SP_BUILTIN_FONT_CELL_W;
+    const int cellh = SP_BUILTIN_FONT_CELL_H;
+
+    size_t n = 0;
+    for (int32_t r = 0; r < batch->rows; ++r) {
+        for (int32_t c = 0; c < batch->cols; ++c) {
+            const sp_cell* cell = &batch->cells[(size_t)r * (size_t)batch->cols + (size_t)c];
+            uint32_t cp = cell->codepoint;
+            if (cp == 0 || cp == ' ') continue;
+
+            int atlas_col;
+            if (cp >= (uint32_t)SP_BUILTIN_FONT_FIRST_CP &&
+                cp <= (uint32_t)SP_BUILTIN_FONT_LAST_CP) {
+                atlas_col = 1 + (int)(cp - (uint32_t)SP_BUILTIN_FONT_FIRST_CP);
+            } else {
+                atlas_col = 0;
+            }
+
+            sp_webgl_text_inst* inst = &out[n++];
+            inst->grid_x   = (float)c;
+            inst->grid_y   = (float)r;
+            inst->glyph_w  = (float)cellw;
+            inst->glyph_h  = (float)cellh;
+            inst->bearing_x = 0.0f;
+            inst->bearing_y = 0.0f;
+            inst->atlas_x  = (float)(atlas_col * cellw);
+            inst->atlas_y  = 0.0f;
+            inst->atlas_w  = (float)cellw;
+            inst->atlas_h  = (float)cellh;
+            sp_webgl_color_unpack(cell->attrs.fg, &inst->fg_r);
+            sp_webgl_color_unpack(cell->attrs.bg, &inst->bg_r);
+            inst->flags    = 0;
+        }
+    }
+    return n;
+}
+
 /* ---- vtable ----------------------------------------------------------- */
 
 static bool webgl_init(void* self, const sp_renderer_opts* opts) {
@@ -297,10 +438,13 @@ static bool webgl_init(void* self, const sp_renderer_opts* opts) {
 
     g->prog_cell_bg = sp_webgl_build_program(g, sp_shader_cell_bg_v, sp_shader_cell_bg_f, true);
     if (!g->prog_cell_bg) return false;
+    g->prog_cell_text = sp_webgl_build_program(g, sp_shader_cell_text_v, sp_shader_cell_text_f, true);
+    if (!g->prog_cell_text) return false;
     g->prog_post    = sp_webgl_build_program(g, sp_shader_post_v,    sp_shader_post_f,    false);
     if (!g->prog_post) return false;
 
     sp_webgl_init_cell_bg_geom(g);
+    sp_webgl_init_cell_text_geom(g);
     glGenVertexArrays(1, &g->vao_post);
 
     glGenBuffers(1, &g->ubo_globals);
@@ -309,10 +453,21 @@ static bool webgl_init(void* self, const sp_renderer_opts* opts) {
     glBindBufferBase(GL_UNIFORM_BUFFER, 0, g->ubo_globals);
 
     if (!sp_webgl_ensure_scene_fbo(g, g->fb_w, g->fb_h)) return false;
+    if (!sp_webgl_init_text_atlas(g)) return false;
 
     glUseProgram(g->prog_post);
     GLint loc = glGetUniformLocation(g->prog_post, "iChannel0");
     if (loc >= 0) glUniform1i(loc, 0);
+    glUseProgram(0);
+
+    glUseProgram(g->prog_cell_text);
+    GLint loc_atlas = glGetUniformLocation(g->prog_cell_text, "u_atlas");
+    if (loc_atlas >= 0) glUniform1i(loc_atlas, 0);
+    g->text_loc_atlas_size = glGetUniformLocation(g->prog_cell_text, "u_atlas_size_px");
+    if (g->text_loc_atlas_size >= 0) {
+        glUniform2f(g->text_loc_atlas_size,
+                    (float)g->atlas_w_px, (float)g->atlas_h_px);
+    }
     glUseProgram(0);
 
     g->initialized = true;
@@ -322,12 +477,16 @@ static bool webgl_init(void* self, const sp_renderer_opts* opts) {
 static void webgl_shutdown(void* self) {
     sp_renderer_webgl* g = (sp_renderer_webgl*)self;
     if (!g->initialized) return;
-    if (g->prog_cell_bg) glDeleteProgram(g->prog_cell_bg);
-    if (g->prog_post)    glDeleteProgram(g->prog_post);
-    if (g->vbo_cell_bg)  glDeleteBuffers(1, &g->vbo_cell_bg);
-    if (g->vao_cell_bg)  glDeleteVertexArrays(1, &g->vao_cell_bg);
-    if (g->vao_post)     glDeleteVertexArrays(1, &g->vao_post);
-    if (g->ubo_globals)  glDeleteBuffers(1, &g->ubo_globals);
+    if (g->prog_cell_bg)   glDeleteProgram(g->prog_cell_bg);
+    if (g->prog_cell_text) glDeleteProgram(g->prog_cell_text);
+    if (g->prog_post)      glDeleteProgram(g->prog_post);
+    if (g->vbo_cell_bg)    glDeleteBuffers(1, &g->vbo_cell_bg);
+    if (g->vao_cell_bg)    glDeleteVertexArrays(1, &g->vao_cell_bg);
+    if (g->vbo_cell_text)  glDeleteBuffers(1, &g->vbo_cell_text);
+    if (g->vao_cell_text)  glDeleteVertexArrays(1, &g->vao_cell_text);
+    if (g->vao_post)       glDeleteVertexArrays(1, &g->vao_post);
+    if (g->ubo_globals)    glDeleteBuffers(1, &g->ubo_globals);
+    if (g->tex_atlas)      glDeleteTextures(1, &g->tex_atlas);
     sp_webgl_destroy_scene_fbo(g);
     free(g->custom_post_src);
     memset(g, 0, sizeof(*g));
@@ -390,6 +549,33 @@ static void webgl_draw_cells(void* self, const sp_cell_batch* batch) {
         glUseProgram(0);
     }
     free(inst);
+
+    /* Text pass — one instance per renderable cell. */
+    sp_webgl_text_inst* tinst = (sp_webgl_text_inst*)malloc(batch->cell_count * sizeof(sp_webgl_text_inst));
+    if (!tinst) return;
+    size_t tn = sp_webgl_pack_text_instances(batch, tinst);
+    if (tn > 0) {
+        size_t bytes = tn * sizeof(sp_webgl_text_inst);
+        glBindBuffer(GL_ARRAY_BUFFER, g->vbo_cell_text);
+        if (bytes > g->vbo_cell_text_capacity) {
+            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)bytes, tinst, GL_DYNAMIC_DRAW);
+            g->vbo_cell_text_capacity = bytes;
+        } else {
+            glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)bytes, tinst);
+        }
+        glUseProgram(g->prog_cell_text);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, g->tex_atlas);
+        if (g->text_loc_atlas_size >= 0) {
+            glUniform2f(g->text_loc_atlas_size,
+                        (float)g->atlas_w_px, (float)g->atlas_h_px);
+        }
+        glBindVertexArray(g->vao_cell_text);
+        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)tn);
+        glBindVertexArray(0);
+        glUseProgram(0);
+    }
+    free(tinst);
 }
 
 static void webgl_end_frame(void* self) {
