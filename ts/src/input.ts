@@ -68,10 +68,16 @@ export interface AttachInputArgs {
     /** Cell metrics in CSS pixels, used to convert mouse coords → grid. */
     cellWidthCss:  number;
     cellHeightCss: number;
+    /** Loop keystrokes and pastes back into the terminal as local echo.
+     *  Defaults to true because the browser demo has no backend yet;
+     *  set false once a PTY / telnet session is wired up so echo doesn't
+     *  double. */
+    localEcho?: boolean;
 }
 
 export function attachInput(spiritty: Spiritty, args: AttachInputArgs): () => void {
     const canvas = spiritty.element;
+    const localEcho = args.localEcho ?? true;
 
     // Make the canvas focusable so keydown lands here.
     if (!canvas.hasAttribute("tabindex")) canvas.tabIndex = 0;
@@ -81,6 +87,12 @@ export function attachInput(spiritty: Spiritty, args: AttachInputArgs): () => vo
         if (seq === null) return;
         ev.preventDefault();
         spiritty.sendKey(seq);
+        if (localEcho) {
+            // Enter needs CRLF for the terminal to advance a row; everything
+            // else is forwarded as-is. Control codes and CSI sequences the
+            // parser understands will do the right thing in-grid.
+            spiritty.write(seq === "\r" ? "\r\n" : seq);
+        }
     };
 
     /** Convert a (clientX, clientY) into terminal (row, col), clamped. */
@@ -128,11 +140,21 @@ export function attachInput(spiritty: Spiritty, args: AttachInputArgs): () => vo
         }
     };
 
+    const deliverPaste = (text: string) => {
+        if (text.length === 0) return;
+        spiritty.sendKey(text);
+        if (localEcho) {
+            // Normalize bare \r or \n to CRLF so each pasted line advances
+            // the row (the grid needs an explicit \n after \r).
+            spiritty.write(text.replace(/\r\n?|\n/g, "\r\n"));
+        }
+    };
+
     const onPaste = async (ev: ClipboardEvent) => {
         const text = ev.clipboardData?.getData("text/plain") ?? "";
         if (text.length > 0) {
             ev.preventDefault();
-            spiritty.sendKey(text);
+            deliverPaste(text);
         }
     };
 
@@ -140,9 +162,9 @@ export function attachInput(spiritty: Spiritty, args: AttachInputArgs): () => vo
         // Right-click pastes (xterm convention). Suppress the browser menu.
         ev.preventDefault();
         if (navigator.clipboard) {
-            navigator.clipboard.readText().then(text => {
-                if (text.length > 0) spiritty.sendKey(text);
-            }).catch(() => { /* clipboard read denied; ignore. */ });
+            navigator.clipboard.readText().then(deliverPaste).catch(() => {
+                /* clipboard read denied; ignore. */
+            });
         }
     };
 
