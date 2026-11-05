@@ -4,4 +4,3 @@ ts/dist/
 .claude/
 ts/src/wasm/spiritty.mjs
 ts/src/wasm/spiritty.wasm
-ts/src/wasm/spiritty.d.mts
