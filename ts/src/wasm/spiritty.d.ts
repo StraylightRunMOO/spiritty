@@ -79,12 +79,27 @@ export interface SpTerminal {
     delete(): void;
 }
 
+/** Subset of Emscripten's runtime `GL` module we rely on to attach a
+ *  WebGL2 context to the WASM instance. Exposed by listing 'GL' in the
+ *  emcc EXPORTED_RUNTIME_METHODS flag. */
+export interface EmscriptenGL {
+    createContext(
+        canvas: HTMLCanvasElement,
+        attrs: WebGLContextAttributes & { majorVersion?: number; minorVersion?: number },
+    ): number;  /* opaque handle; 0 on failure */
+    makeContextCurrent(handle: number): boolean;
+}
+
 export interface SpiritteyModule {
     /** Direct heap access for zero-copy paths. */
     HEAPU8: Uint8Array;
     HEAPU32: Uint32Array;
     HEAPF32: Float32Array;
     wasmMemory: WebAssembly.Memory;
+
+    /** Emscripten WebGL plumbing — present because 'GL' is in the
+     *  EXPORTED_RUNTIME_METHODS list (see bindings/CMakeLists.txt). */
+    GL: EmscriptenGL;
 
     _malloc(bytes: number): number;
     _free(ptr: number): void;

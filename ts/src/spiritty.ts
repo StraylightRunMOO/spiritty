@@ -85,8 +85,10 @@ export class Spiritty {
     static async create(args: SpirittyArgs): Promise<Spiritty> {
         const opts: SpOptions = { ...DEFAULT_OPTIONS, ...args.options };
 
-        // Tell Emscripten to use this canvas for its WebGL2 context.
-        // The flag name is set in stone by emscripten — `Module.canvas`.
+        // Passing `canvas` here lets emscripten find the DOM node, but
+        // under MODULARIZE + EXPORT_ES6 it does not auto-create a GL
+        // context the way the pre-MODULARIZE loader did. We create and
+        // make-current one ourselves below.
         const initArgs: SpiritteyInitArgs = {
             canvas: args.canvas,
             ...(args.locateFile ? { locateFile: args.locateFile } : {}),
@@ -94,6 +96,28 @@ export class Spiritty {
 
         const factory = await loadFactory();
         const module  = await factory(initArgs);
+
+        // Attach a WebGL2 context to the WASM instance. Without this the
+        // first gl* call from renderer_webgl.c throws
+        // "Cannot read properties of undefined (reading 'bindFramebuffer')"
+        // because Emscripten's GLctx is only populated by makeContextCurrent.
+        const ctxHandle = module.GL.createContext(args.canvas, {
+            majorVersion: 2,
+            minorVersion: 0,
+            alpha: false,
+            depth: false,
+            stencil: false,
+            antialias: false,
+            premultipliedAlpha: false,
+            preserveDrawingBuffer: false,
+        });
+        if (!ctxHandle) {
+            throw new Error("spiritty: WebGL2 context creation failed (browser support?)");
+        }
+        if (!module.GL.makeContextCurrent(ctxHandle)) {
+            throw new Error("spiritty: GL.makeContextCurrent failed");
+        }
+
         const term    = module.createTerminal(opts);
         if (!term.valid()) {
             term.delete();

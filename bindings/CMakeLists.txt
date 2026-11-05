@@ -51,7 +51,11 @@ target_link_options(spiritty_wasm PRIVATE
     "-sINITIAL_MEMORY=33554432"  # 32 MB; growth handles spikes.
     "-sFILESYSTEM=0"
     "-sENVIRONMENT=web,worker"
-    "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32','HEAPF32','wasmMemory']"
+    # 'GL' lets the TS wrapper call GL.createContext + makeContextCurrent
+    # on the <canvas>. Without that, renderer_webgl.c's first glBindFramebuffer
+    # throws "Cannot read properties of undefined (reading 'bindFramebuffer')"
+    # because Emscripten's GLctx is only set once a context is made current.
+    "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32','HEAPF32','wasmMemory','GL']"
 )
 
 # `--emit-tsd` would auto-generate spiritty.d.ts but it requires `tsc` in
