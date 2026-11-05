@@ -9,7 +9,7 @@ include(FetchContent)
 FetchContent_Declare(
     nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG        v3.11.3
+    GIT_TAG        v3.12.0
 )
 
 # ---------------------------------------------------------------------------
@@ -18,7 +18,7 @@ FetchContent_Declare(
 FetchContent_Declare(
     halyard
     GIT_REPOSITORY https://github.com/StraylightRunMOO/halyard.git
-    GIT_TAG        cd5b9dc820d1fe2a0f72be54cbdb4c908f196cf2 # master @ 2026-05-01
+    GIT_TAG        1c0f82cce9fc3e7540d8f36fa146aa416a24dde6 # master @ 2026-09-23
 )
 
 # ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ FetchContent_Declare(
 FetchContent_Declare(
     memento
     GIT_REPOSITORY https://github.com/StraylightRunMOO/memento.git
-    GIT_TAG        c11c45ff38d06f3023923a157a8d1bd0bd350b4b # master @ 2026-05-01
+    GIT_TAG        5dbb9e1976bdf250ea31c4b096b9cea4b99163b4 # master @ 2026-11-04
 )
 
 # ---------------------------------------------------------------------------
@@ -35,8 +35,12 @@ FetchContent_Declare(
 # ---------------------------------------------------------------------------
 FetchContent_Declare(
     telnetty
-    GIT_REPOSITORY https://github.com/StraylightRunMOO/telnetty.git
-    GIT_TAG        0effaaa93f150aca477b5e62fbfa75c4c3a14c07 # master @ 2026-05-01
+    # Upstream split: the original StraylightRunMOO/telnetty repo was
+    # rewritten in Go (io.ReadWriter API). The C single-header fork lives
+    # at StraylightRunMOO/telnetty.h, matching the suspenders.h / halyard
+    # single-header-lib naming.
+    GIT_REPOSITORY https://github.com/StraylightRunMOO/telnetty.h.git
+    GIT_TAG        cea57bd  # Release Telnetty 1.2.1 @ 2026-11-xx
 )
 
 # ---------------------------------------------------------------------------
@@ -47,7 +51,7 @@ FetchContent_Declare(
 FetchContent_Declare(
     suspenders
     GIT_REPOSITORY https://github.com/StraylightRunMOO/suspenders.h.git
-    GIT_TAG        master # TODO: pin to commit SHA when first integrated
+    GIT_TAG        333f294cad12d2e81e6669c2d935ad7f067b2972 # master @ 2026-11-03
 )
 
 # ---------------------------------------------------------------------------
@@ -57,7 +61,7 @@ FetchContent_Declare(
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.91.5
+    GIT_TAG        v1.93.0
 )
 
 # ---------------------------------------------------------------------------
@@ -79,7 +83,7 @@ endif()
 FetchContent_Declare(
     glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
-    GIT_TAG        3.4
+    GIT_TAG        3.5.1
 )
 
 # ---------------------------------------------------------------------------
@@ -91,7 +95,7 @@ FetchContent_Declare(
 FetchContent_Declare(
     ghostty_shaders
     GIT_REPOSITORY https://github.com/0xhckr/ghostty-shaders.git
-    GIT_TAG        aa6121ba2ddd5251ac75b92729c758fe41256e55 # main @ 2026-05-01
+    GIT_TAG        6b3e4d1c88e62989e5fa626a9fa59b4a8664ce6f # main @ 2026-11-03
 )
 
 # ---------------------------------------------------------------------------

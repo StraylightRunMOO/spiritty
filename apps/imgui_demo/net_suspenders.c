@@ -52,7 +52,7 @@
 
 /* Per-session state. Lives on the heap, owned by net_session. */
 struct net_session {
-    hose_t              hose;          /* io_uring socket abstraction */
+    suspenders_hose_t   hose;          /* io_uring socket abstraction */
     struct buf          io_buf;        /* read scratch */
     telnetty_context_t* tn;
 
@@ -108,8 +108,10 @@ static void on_telnet_event(telnetty_context_t* ctx,
 static void drain_outbound(net_session* s) {
     telnetty_buffer_t* outb = telnetty_get_output_buffer(s->tn);
     if (!outb || outb->length == 0) return;
-    /* hose_write suspends the calling cr until the io_uring CQE lands. */
-    hose_write(&s->hose, outb->data, outb->length);
+    /* suspenders_hose_write suspends the calling cr until the io_uring
+     * CQE lands. Return value is ignored — telnetty will re-queue on the
+     * next drain if the peer is slow. */
+    (void)suspenders_hose_write(&s->hose, outb->data, outb->length);
     telnetty_flush(s->tn);
 }
 
@@ -135,14 +137,15 @@ static void reader_main(void* arg) {
             drain_outbound(s);
         }
 
-        /* hose_read suspends the cr; another runnable cr (e.g. the
-         * writer) gets the CPU until the read completes. */
-        if (!hose_read(&s->hose, buf, sizeof buf)) {
-            /* EOF or error. */
+        /* suspenders_hose_read suspends the cr; another runnable cr
+         * (e.g. the writer) gets the CPU until the read completes.
+         * Returns bytes read; 0 = EOF, negative = error. */
+        ssize_t n = suspenders_hose_read(&s->hose, buf, sizeof buf);
+        if (n <= 0) {
             if (s->on_bytes) s->on_bytes(NULL, 0, s->on_bytes_user);
             return;
         }
-        telnetty_process(s->tn, buf, sizeof buf);
+        telnetty_process(s->tn, buf, (size_t)n);
         drain_outbound(s);
     }
 }
@@ -201,13 +204,14 @@ net_session* net_open(const char* uri, net_on_bytes_fn on_bytes, void* user) {
     s->tn = telnetty_create(on_telnet_event, s);
     if (!s->tn) { free(s); return NULL; }
 
-    /* hose_init wants a struct buf; supply our scratch. */
+    /* suspenders_hose_init wants a struct buf; supply our scratch.
+     * The ring is implicit (worker-local) in 1.2.1 — no more ring arg. */
     s->io_buf.data = NULL;
     s->io_buf.len  = 0;
     s->io_buf.cap  = 0;
-    hose_init(&s->hose, suspenders_ring(), &s->io_buf);
+    suspenders_hose_init(&s->hose, &s->io_buf);
 
-    if (!hose_dial(&s->hose, uri_copy)) {
+    if (!suspenders_hose_dial(&s->hose, uri_copy)) {
         telnetty_destroy(s->tn);
         free(s);
         return NULL;
@@ -216,7 +220,7 @@ net_session* net_open(const char* uri, net_on_bytes_fn on_bytes, void* user) {
     /* Channel for outbound chunks (heap-allocated send_chunk_t copies). */
     s->send_chan = suspenders_chan_create(sizeof(send_chunk_t), 64);
     if (!s->send_chan) {
-        hose_close(&s->hose);
+        suspenders_hose_close(&s->hose);
         telnetty_destroy(s->tn);
         free(s);
         return NULL;
@@ -260,7 +264,7 @@ void net_close(net_session* s) {
     for (int i = 0; i < 64; ++i) {
         suspenders_run();
     }
-    hose_close(&s->hose);
+    suspenders_hose_close(&s->hose);
     telnetty_destroy(s->tn);
     free(s->io_buf.data);
     pthread_mutex_destroy(&s->send_mu);
