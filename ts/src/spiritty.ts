@@ -118,10 +118,11 @@ export class Spiritty {
             throw new Error("spiritty: GL.makeContextCurrent failed");
         }
 
-        const term    = module.createTerminal(opts);
+        const dpr = window.devicePixelRatio || 1;
+        const term = module.createTerminal(opts, args.canvas.width, args.canvas.height, dpr);
         if (!term.valid()) {
             term.delete();
-            throw new Error("spiritty: createTerminal returned an invalid handle");
+            throw new Error("spiritty: createTerminal returned an invalid handle (renderer init failed?)");
         }
         return new Spiritty(module, term, args.canvas);
     }

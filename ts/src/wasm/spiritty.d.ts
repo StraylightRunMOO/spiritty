@@ -39,6 +39,8 @@ export type SpSelMode = 0 | 1 | 2 | 3;
  * by Embind on every class binding) when you are finished with the
  * handle, or wrap creation/destruction in a `try`/`finally`.
  */
+/** Only the names surfaced on the JS side are listed here; keep in
+ *  sync with embind.cpp. */
 export interface SpTerminal {
     valid(): boolean;
 
@@ -53,6 +55,10 @@ export interface SpTerminal {
     writeHeap(offset: number, len: number): void;
 
     resize(cols: number, rows: number): void;
+    /** Framebuffer (canvas backing-store) resize. Call after
+     *  canvas.width/height change; pair with `resize` if cols/rows also
+     *  changed. */
+    resizeFramebuffer(fbW: number, fbH: number): void;
     clear(): void;
     reset(): void;
     render(): void;
@@ -104,7 +110,10 @@ export interface SpiritteyModule {
     _malloc(bytes: number): number;
     _free(ptr: number): void;
 
-    createTerminal(opts: SpOptions): SpTerminal;
+    /** Framebuffer dimensions + DPR are needed up-front because the
+     *  WebGL backend compiles shaders and sizes the scene FBO during
+     *  init, which happens inside this call. */
+    createTerminal(opts: SpOptions, fbW: number, fbH: number, dpr: number): SpTerminal;
     destroyTerminal(t: SpTerminal): void;
 
     version(): string;

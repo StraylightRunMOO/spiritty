@@ -43,16 +43,44 @@ namespace {
  * tears the C objects down in the right order. */
 class SpTerminalHandle {
 public:
-    explicit SpTerminalHandle(const sp_options& opts)
+    SpTerminalHandle(const sp_options& opts,
+                     int32_t fb_w, int32_t fb_h, float dpr)
         : term_(sp_terminal_create(&opts))
         , renderer_(nullptr)
     {
-        if (term_) {
-            renderer_ = sp_renderer_webgl_create();
-            if (renderer_) {
-                sp_terminal_attach_renderer(term_, renderer_);
-            }
+        if (!term_) return;
+
+        renderer_ = sp_renderer_webgl_create();
+        if (!renderer_) {
+            sp_terminal_destroy(term_);
+            term_ = nullptr;
+            return;
         }
+
+        /* Bring the backend up. Without this, the vtable is attached
+         * but every program / buffer handle in the renderer struct is
+         * still zero, so the first render triggers
+         *   WebGL: INVALID_OPERATION: no valid shader program in use
+         *   WebGL: INVALID_OPERATION: bufferData: no buffer
+         * The native imgui demo does this in terminal_widget.cpp. */
+        sp_renderer_opts ropts{};
+        ropts.framebuffer_width   = fb_w;
+        ropts.framebuffer_height  = fb_h;
+        ropts.device_pixel_ratio  = dpr;
+        ropts.cell_width_px       = 8.0f;   /* builtin 8x16 bitmap font */
+        ropts.cell_height_px      = 16.0f;
+        ropts.use_linear_blending   = true;
+        ropts.use_linear_correction = true;
+
+        if (!renderer_->vt->init(renderer_->self, &ropts)) {
+            sp_renderer_webgl_destroy(renderer_);
+            renderer_ = nullptr;
+            sp_terminal_destroy(term_);
+            term_ = nullptr;
+            return;
+        }
+
+        sp_terminal_attach_renderer(term_, renderer_);
     }
 
     SpTerminalHandle(const SpTerminalHandle&)            = delete;
@@ -97,6 +125,14 @@ public:
 
     void resize(int32_t cols, int32_t rows) {
         if (term_) sp_terminal_resize(term_, cols, rows);
+    }
+
+    /* Framebuffer resize — the <canvas> backing store changed. Must be
+     * paired with a `resize` call if cols/rows also changed. */
+    void resizeFramebuffer(int32_t fb_w, int32_t fb_h) {
+        if (renderer_ && renderer_->vt && renderer_->vt->resize) {
+            renderer_->vt->resize(renderer_->self, fb_w, fb_h);
+        }
     }
 
     void clear() { if (term_) sp_terminal_clear(term_); }
@@ -194,7 +230,8 @@ struct SpOptionsJS {
     std::string custom_shader_path; /* "" → none */
 };
 
-SpTerminalHandle* createTerminal(const SpOptionsJS& js) {
+SpTerminalHandle* createTerminal(const SpOptionsJS& js,
+                                 int32_t fb_w, int32_t fb_h, float dpr) {
     sp_options opts;
     sp_options_default(&opts);
     opts.cols              = js.cols;
@@ -213,7 +250,7 @@ SpTerminalHandle* createTerminal(const SpOptionsJS& js) {
                               ? nullptr : js.custom_shader_path.c_str();
     /* palette stays NULL → core uses built-in xterm 256-color. TS can
      * mutate the palette later via a dedicated API once we add one. */
-    return new SpTerminalHandle(opts);
+    return new SpTerminalHandle(opts, fb_w, fb_h, dpr);
 }
 
 void destroyTerminal(SpTerminalHandle* h) { delete h; }
@@ -243,6 +280,7 @@ EMSCRIPTEN_BINDINGS(spiritty) {
         .function("write",          &SpTerminalHandle::write)
         .function("writeHeap",      &SpTerminalHandle::writeHeap)
         .function("resize",         &SpTerminalHandle::resize)
+        .function("resizeFramebuffer", &SpTerminalHandle::resizeFramebuffer)
         .function("clear",          &SpTerminalHandle::clear)
         .function("reset",          &SpTerminalHandle::reset)
         .function("render",         &SpTerminalHandle::render)
