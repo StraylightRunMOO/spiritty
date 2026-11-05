@@ -28,21 +28,20 @@ export const SP_SEL_NORMAL: SpSelMode = 1;
 export const SP_SEL_WORD:   SpSelMode = 2;
 export const SP_SEL_LINE:   SpSelMode = 3;
 
-/**
- * Runtime URL for the Embind module. CMake drops spiritty.mjs into
- * ts/public, which Vite serves at the site root. Dynamic import keeps
- * the .mjs out of the TS module graph entirely (no bundler attempt to
- * statically analyze it). Override via SpirittyArgs.factoryUrl if
- * hosting under a non-root prefix.
- */
-const DEFAULT_FACTORY_URL = "/spiritty.mjs";
-
 type SpirittyFactory = (args?: SpiritteyInitArgs) => Promise<SpiritteyModule>;
 
-async function loadFactory(url: string): Promise<SpirittyFactory> {
-    /* @vite-ignore */
-    const mod = await import(/* @vite-ignore */ url) as { default: SpirittyFactory };
-    return mod.default;
+/**
+ * Statically import the Embind ES module. The CMake build drops it (and
+ * the companion .wasm) into ./wasm/ so it lives inside the TS source
+ * tree. Vite resolves it normally (transforms + sourcemap + bundling),
+ * unlike files in /public which the dev middleware refuses to import.
+ *
+ * The Embind glue already does `new URL("./spiritty.wasm", import.meta.url)`
+ * to find the binary, so co-locating the two files is all we need.
+ */
+async function loadFactory(): Promise<SpirittyFactory> {
+    const mod = await import("./wasm/spiritty.mjs");
+    return mod.default as SpirittyFactory;
 }
 
 const DEFAULT_OPTIONS: SpOptions = {
@@ -66,8 +65,6 @@ export interface SpirittyArgs {
     options?: Partial<SpOptions>;
     /** Forwarded to the Embind module loader. */
     locateFile?: SpiritteyInitArgs["locateFile"];
-    /** Override the URL of the spiritty.mjs ES module (default: /spiritty.mjs). */
-    factoryUrl?: string;
 }
 
 export class Spiritty {
@@ -95,7 +92,7 @@ export class Spiritty {
             ...(args.locateFile ? { locateFile: args.locateFile } : {}),
         };
 
-        const factory = await loadFactory(args.factoryUrl ?? DEFAULT_FACTORY_URL);
+        const factory = await loadFactory();
         const module  = await factory(initArgs);
         const term    = module.createTerminal(opts);
         if (!term.valid()) {

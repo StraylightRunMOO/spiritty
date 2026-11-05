@@ -3,17 +3,18 @@ import { defineConfig } from "vite";
 /**
  * Spiritty browser demo — Vite config.
  *
- * The WASM module (spiritty.mjs + spiritty.wasm) is dropped into ./public
- * by the CMake build (see bindings/CMakeLists.txt RUNTIME_OUTPUT_DIRECTORY).
- * Vite serves /public at the site root in dev and copies it verbatim
- * during build, so the import path "/spiritty.mjs" works in both modes.
+ * The WASM module (spiritty.mjs + spiritty.wasm) is dropped into
+ * ./src/wasm by the CMake build (see bindings/CMakeLists.txt
+ * RUNTIME_OUTPUT_DIRECTORY). spiritty.ts imports the .mjs as a normal
+ * module; the Embind glue resolves the .wasm via
+ * `new URL("./spiritty.wasm", import.meta.url)`.
  *
- * `assetsInclude` makes Vite treat the .wasm file as a passthrough asset
- * so it doesn't try to inline it.
+ * `assetsInclude` keeps Vite from trying to transform/inline the .wasm —
+ * it's a passthrough asset that the .mjs fetches at module-init time.
  */
 export default defineConfig({
     root: ".",
-    publicDir: "public",
+    publicDir: false,
     server: {
         port: 5173,
         strictPort: true,

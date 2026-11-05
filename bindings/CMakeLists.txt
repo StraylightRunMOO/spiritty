@@ -62,8 +62,15 @@ target_link_options(spiritty_wasm PRIVATE
 #
 #   "--emit-tsd=spiritty.d.ts"
 
-# Drop output next to the TS project so Vite can serve it directly.
+# Drop output into ts/src/wasm/ so Vite resolves spiritty.mjs as a real
+# module (with transforms + sourcemaps + bundling) instead of a public
+# asset. Files in /public are intentionally rejected by Vite when imported
+# from source code — the dev middleware refuses to load them, citing
+# "should not be imported from source code; can only be referenced via
+# HTML tags." Putting the .mjs in src/ resolves that and lets the .wasm
+# sit next to it for `new URL("./spiritty.wasm", import.meta.url)`
+# resolution from the Embind glue.
 set_target_properties(spiritty_wasm PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/ts/public"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/ts/public"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/ts/src/wasm"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/ts/src/wasm"
 )
