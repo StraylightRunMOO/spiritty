@@ -49,7 +49,7 @@ const DEFAULT_OPTIONS: SpOptions = {
     rows:             24,
     scrollbackLines:  1000,
     fontSize:         14,
-    fontFamily:       "monospace",
+    fontFamily:       "IBM Plex Mono",
     colorFg:          0xE0E0E0FF,
     colorBg:          0x101010FF,
     colorCursor:      0xE0E0E0FF,
@@ -109,7 +109,7 @@ export class Spiritty {
             stencil: false,
             antialias: false,
             premultipliedAlpha: false,
-            preserveDrawingBuffer: false,
+            preserveDrawingBuffer: true,
         });
         if (!ctxHandle) {
             throw new Error("spiritty: WebGL2 context creation failed (browser support?)");
@@ -175,6 +175,20 @@ export class Spiritty {
 
     setCustomShader(glsl: string): boolean {
         return this.term.setCustomShader(glsl);
+    }
+
+    /** Framebuffer pixels (includes devicePixelRatio). */
+    cellWidth(): number { return this.term.cellWidth(); }
+    cellHeight(): number { return this.term.cellHeight(); }
+
+    /**
+     * Replace the active TTF/OTF. `data` is the font file bytes;
+     * empty/undefined reloads the builtin IBM Plex Mono.
+     * `pixelHeight` is framebuffer pixels (`cssPx * devicePixelRatio`);
+     * 0 keeps the current size. Cell metrics update to the new font.
+     */
+    loadFont(data?: Uint8Array | null, pixelHeight = 0): boolean {
+        return this.term.loadFont(data, pixelHeight);
     }
 
     /** Begin pumping render frames. Idempotent. */

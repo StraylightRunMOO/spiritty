@@ -30,7 +30,8 @@ void main() {
                        float(vid == 2 || vid == 3));
 
     vec2 cell_origin = G.grid_padding + a_grid_pos * G.cell_size_px;
-    vec2 glyph_origin = cell_origin + a_glyph_bearing;
+    /* Integer pixel snap so 1:1 atlas samples land on texel centres. */
+    vec2 glyph_origin = floor(cell_origin + a_glyph_bearing + 0.5);
     vec2 corner_px = glyph_origin + corner * a_glyph_size;
 
     gl_Position = G.projection * vec4(corner_px, 0.0, 1.0);

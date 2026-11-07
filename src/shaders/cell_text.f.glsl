@@ -56,7 +56,12 @@ void main() {
 #ifdef SPIRITTY_USE_MSDF
     float a = msdf_alpha();
 #else
-    float a = texture(u_atlas, v_atlas_uv).r;
+    /* texelFetch at 1:1. texture/textureLod on an R8 atlas without
+     * mipmaps returns 0 on some GLES/SwiftShader paths, which paints
+     * a full cell grid of background and no glyphs. */
+    ivec2 asz = textureSize(u_atlas, 0);
+    ivec2 ap = clamp(ivec2(floor(v_atlas_uv * vec2(asz))), ivec2(0), asz - 1);
+    float a = texelFetch(u_atlas, ap, 0).r;
 #endif
 
     vec4 fg = v_fg;
@@ -70,14 +75,6 @@ void main() {
         float blend_l = linearize1(unlinearize1(fg_l) * a +
                                    unlinearize1(bg_l) * (1.0 - a));
         a = clamp((blend_l - bg_l) / (fg_l - bg_l), 0.0, 1.0);
-    }
-#endif
-
-#ifndef SPIRITTY_USE_LINEAR_BLENDING
-    if (fg.a > 0.0) {
-        fg.rgb /= fg.a;
-        fg = unlinearize(fg);
-        fg.rgb *= fg.a;
     }
 #endif
 

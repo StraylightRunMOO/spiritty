@@ -19,7 +19,8 @@
 #include "spiritty/spiritty_renderer.h"
 #include "internal.h"
 #include "shaders_embed.h"
-#include "builtin_font.h"
+#include "font.h"
+#include "atlas.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -78,6 +79,7 @@ typedef ptrdiff_t     GLsizeiptr;
 #define GL_LINK_STATUS            0x8B82
 #define GL_INFO_LOG_LENGTH        0x8B84
 #define GL_UNPACK_ALIGNMENT       0x0CF5
+#define GL_UNPACK_ROW_LENGTH      0x0CF2
 #define GL_UNSIGNED_INT           0x1405
 
 /* ---- Function pointer table ----------------------------------------- */
@@ -139,6 +141,7 @@ typedef void          (*PFN_glDeleteTextures)(GLsizei, const GLuint*);
 typedef void          (*PFN_glBindTexture)(GLenum, GLuint);
 typedef void          (*PFN_glActiveTexture)(GLenum);
 typedef void          (*PFN_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+typedef void          (*PFN_glTexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void*);
 typedef void          (*PFN_glTexParameteri)(GLenum, GLenum, GLint);
 typedef void          (*PFN_glPixelStorei)(GLenum, GLint);
 typedef void          (*PFN_glVertexAttribIPointer)(GLuint, GLint, GLenum, GLsizei, const void*);
@@ -196,6 +199,7 @@ typedef struct {
     PFN_glBindTexture            BindTexture;
     PFN_glActiveTexture          ActiveTexture;
     PFN_glTexImage2D             TexImage2D;
+    PFN_glTexSubImage2D          TexSubImage2D;
     PFN_glTexParameteri          TexParameteri;
     PFN_glPixelStorei            PixelStorei;
     PFN_glVertexAttribIPointer   VertexAttribIPointer;
@@ -257,6 +261,7 @@ static bool sp_gl_load(sp_gl_api* api, void* (*loader)(const char*)) {
     GL_LOAD(api, loader, BindTexture);
     GL_LOAD(api, loader, ActiveTexture);
     GL_LOAD(api, loader, TexImage2D);
+    GL_LOAD(api, loader, TexSubImage2D);
     GL_LOAD(api, loader, TexParameteri);
     GL_LOAD(api, loader, PixelStorei);
     GL_LOAD(api, loader, VertexAttribIPointer);
@@ -334,12 +339,13 @@ typedef struct {
 
     GLuint           vao_post;              /* empty VAO; verts hardcoded */
 
-    /* Builtin glyph atlas (R8). One row of (1 + 95) cells: column 0 holds
-     * the fallback glyph (hollow box), columns 1..95 hold ASCII 32..126. */
+    /* Dynamic R8 glyph atlas filled from a TTF via stb_truetype. */
     GLuint           tex_atlas;
     int32_t          atlas_w_px;
     int32_t          atlas_h_px;
     GLint            text_loc_atlas_size; /* uniform "u_atlas_size_px" */
+    sp_font*         font;
+    sp_atlas*        atlas;
 
     /* Globals UBO */
     GLuint           ubo_globals;
@@ -351,6 +357,8 @@ typedef struct {
 
     /* Custom post-process shader (replaces prog_post when set). */
     char*            custom_post_src;
+    float            time_seconds;
+    int              frame;
 } sp_renderer_gl;
 
 /* ---- GLSL preamble assembly ----------------------------------------- */
@@ -532,52 +540,62 @@ static void sp_color_unpack(uint32_t c, float out[4]) {
 
 /* ---- Text pass: builtin atlas + geometry + draw -------------------- */
 
-/* Build a (96 cells * 8 px) wide x 16 px tall R8 atlas from the embedded
- * VGA bitmap font. Column 0 is the fallback glyph; columns 1..95 are
- * ASCII 32..126 in order. Bit 7 of each row byte is the leftmost pixel. */
-static bool sp_gl_init_text_atlas(sp_renderer_gl* g) {
-    const int cols  = 1 + SP_BUILTIN_FONT_GLYPH_COUNT;
-    const int cellw = SP_BUILTIN_FONT_CELL_W;
-    const int cellh = SP_BUILTIN_FONT_CELL_H;
-    const int W     = cols * cellw;
-    const int H     = cellh;
-
-    uint8_t* px = (uint8_t*)calloc((size_t)W * (size_t)H, 1);
-    if (!px) return false;
-
-    /* Splat one glyph's 16 rows into atlas region [col_x .. col_x+8]. */
-    #define SP_BUILTIN_BLIT(col_x, glyph_bytes) do {                  \
-        for (int y = 0; y < cellh; ++y) {                             \
-            uint8_t row = (glyph_bytes)[y];                           \
-            uint8_t* dst = px + (size_t)y * (size_t)W + (size_t)(col_x); \
-            for (int x = 0; x < cellw; ++x)                           \
-                dst[x] = (row & (uint8_t)(0x80u >> x)) ? 0xFF : 0x00; \
-        }                                                             \
-    } while (0)
-
-    SP_BUILTIN_BLIT(0, sp_builtin_font_fallback);
-    for (int i = 0; i < SP_BUILTIN_FONT_GLYPH_COUNT; ++i) {
-        SP_BUILTIN_BLIT((i + 1) * cellw, sp_builtin_font_8x16[i]);
-    }
-    #undef SP_BUILTIN_BLIT
-
-    g->atlas_w_px = W;
-    g->atlas_h_px = H;
-
-    g->gl.GenTextures(1, &g->tex_atlas);
-    g->gl.BindTexture(GL_TEXTURE_2D, g->tex_atlas);
-    /* Atlas rows aren't 4-byte aligned; we ship single-byte rows. */
-    g->gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    g->gl.TexImage2D(GL_TEXTURE_2D, 0, GL_R8, W, H, 0, GL_RED, GL_UNSIGNED_BYTE, px);
+static void gl_bind_atlas_filter(sp_renderer_gl* g) {
+    /* NEAREST at 1:1 with CPU-oversampled glyphs. LINEAR would blur the
+     * coverage we already box-filtered down. */
     g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+static bool gl_upload_atlas_full(sp_renderer_gl* g) {
+    if (!g->atlas || !g->gl.TexImage2D) return false;
+    g->atlas_w_px = sp_atlas_width(g->atlas);
+    g->atlas_h_px = sp_atlas_height(g->atlas);
+    if (!g->tex_atlas) g->gl.GenTextures(1, &g->tex_atlas);
+    g->gl.BindTexture(GL_TEXTURE_2D, g->tex_atlas);
+    g->gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    g->gl.TexImage2D(GL_TEXTURE_2D, 0, GL_R8, g->atlas_w_px, g->atlas_h_px, 0,
+                     GL_RED, GL_UNSIGNED_BYTE, sp_atlas_pixels(g->atlas));
+    gl_bind_atlas_filter(g);
     g->gl.PixelStorei(GL_UNPACK_ALIGNMENT, 4);
     g->gl.BindTexture(GL_TEXTURE_2D, 0);
-
-    free(px);
     return true;
+}
+
+static bool gl_reload_font(sp_renderer_gl* g, const uint8_t* ttf, size_t n, float px) {
+    if (px < 1.0f) {
+        px = g->opts.cell_height_px > 0.0f ? g->opts.cell_height_px * 0.8f : 16.0f;
+    }
+    sp_font* font = (ttf && n)
+        ? sp_font_create_from_memory(ttf, n, px)
+        : sp_font_create_builtin(px);
+    if (!font) return false;
+    sp_atlas* atlas = sp_atlas_create(1024, 1024);
+    if (!atlas) {
+        sp_font_destroy(font);
+        return false;
+    }
+    if (!sp_font_seed_ascii(font, atlas)) {
+        sp_atlas_destroy(atlas);
+        sp_font_destroy(font);
+        return false;
+    }
+    float cw = 0.0f, ch = 0.0f;
+    sp_font_cell_metrics(font, &cw, &ch, NULL);
+    if (cw > 0.0f) g->opts.cell_width_px  = cw;
+    if (ch > 0.0f) g->opts.cell_height_px = ch;
+
+    sp_font_destroy(g->font);
+    sp_atlas_destroy(g->atlas);
+    g->font  = font;
+    g->atlas = atlas;
+    return gl_upload_atlas_full(g);
+}
+
+static bool sp_gl_init_text_atlas(sp_renderer_gl* g) {
+    return gl_reload_font(g, NULL, 0, g->opts.font_size_px);
 }
 
 /* Set up VAO/VBO for the per-instance text attributes (matches the layout
@@ -616,16 +634,11 @@ static void sp_gl_init_cell_text_geom(sp_renderer_gl* g) {
     g->gl.BindVertexArray(0);
 }
 
-/* Pack one text instance per cell whose codepoint is renderable. Returns
- * the instance count. Codepoints in [32, 126] map straight into the atlas;
- * everything else falls through to the fallback glyph at column 0 (or is
- * skipped when codepoint == 0 / space, which is just blank). */
-static size_t sp_gl_pack_text_instances(const sp_renderer_gl* g,
+static const sp_atlas_slot* gl_ensure_glyph(sp_renderer_gl* g, uint32_t cp);
+
+static size_t sp_gl_pack_text_instances(sp_renderer_gl* g,
                                         const sp_cell_batch* batch,
                                         sp_gl_text_inst* out) {
-    const int cellw = SP_BUILTIN_FONT_CELL_W;
-    const int cellh = SP_BUILTIN_FONT_CELL_H;
-
     size_t n = 0;
     for (int32_t r = 0; r < batch->rows; ++r) {
         for (int32_t c = 0; c < batch->cols; ++c) {
@@ -633,31 +646,25 @@ static size_t sp_gl_pack_text_instances(const sp_renderer_gl* g,
             uint32_t cp = cell->codepoint;
             if (cp == 0 || cp == ' ') continue;
 
-            int atlas_col;
-            if (cp >= (uint32_t)SP_BUILTIN_FONT_FIRST_CP &&
-                cp <= (uint32_t)SP_BUILTIN_FONT_LAST_CP) {
-                atlas_col = 1 + (int)(cp - (uint32_t)SP_BUILTIN_FONT_FIRST_CP);
-            } else {
-                atlas_col = 0;  /* fallback hollow box */
-            }
+            const sp_atlas_slot* slot = gl_ensure_glyph(g, cp);
+            if (!slot) continue;
 
             sp_gl_text_inst* inst = &out[n++];
-            inst->grid_x   = (float)c;
-            inst->grid_y   = (float)r;
-            inst->glyph_w  = (float)cellw;
-            inst->glyph_h  = (float)cellh;
-            inst->bearing_x = 0.0f;
-            inst->bearing_y = 0.0f;
-            inst->atlas_x  = (float)(atlas_col * cellw);
-            inst->atlas_y  = 0.0f;
-            inst->atlas_w  = (float)cellw;
-            inst->atlas_h  = (float)cellh;
+            inst->grid_x    = (float)c;
+            inst->grid_y    = (float)r;
+            inst->glyph_w   = (float)slot->w;
+            inst->glyph_h   = (float)slot->h;
+            inst->bearing_x = (float)slot->bearing_x;
+            inst->bearing_y = (float)slot->bearing_y;
+            inst->atlas_x   = (float)slot->x;
+            inst->atlas_y   = (float)slot->y;
+            inst->atlas_w   = (float)slot->w;
+            inst->atlas_h   = (float)slot->h;
             sp_color_unpack(cell->attrs.fg, &inst->fg_r);
             sp_color_unpack(cell->attrs.bg, &inst->bg_r);
-            inst->flags    = 0;
+            inst->flags     = 0;
         }
     }
-    (void)g;
     return n;
 }
 
@@ -686,8 +693,7 @@ static bool gl_init(void* self, const sp_renderer_opts* opts) {
     sp_renderer_gl* g = (sp_renderer_gl*)self;
     if (!opts) return false;
     g->opts = *opts;
-    if (g->opts.cell_width_px  <= 0.0f) g->opts.cell_width_px  = 8.0f;
-    if (g->opts.cell_height_px <= 0.0f) g->opts.cell_height_px = 16.0f;
+    /* Cell metrics filled in by gl_reload_font from the TTF if still 0. */
     g->fb_w = opts->framebuffer_width;
     g->fb_h = opts->framebuffer_height;
 
@@ -757,6 +763,8 @@ static void gl_shutdown(void* self) {
     if (g->tex_atlas)      g->gl.DeleteTextures(1, &g->tex_atlas);
     sp_gl_destroy_scene_fbo(g);
     free(g->custom_post_src);
+    sp_font_destroy(g->font);
+    sp_atlas_destroy(g->atlas);
     memset(g, 0, sizeof(*g));
 }
 
@@ -780,7 +788,9 @@ static void gl_begin_frame(void* self) {
 
 static void gl_draw_cells(void* self, const sp_cell_batch* batch) {
     sp_renderer_gl* g = (sp_renderer_gl*)self;
-    if (!g->in_frame || !batch || batch->cell_count == 0) return;
+    if (!g->in_frame || !batch) return;
+    g->time_seconds = batch->time_seconds;
+    if (batch->cell_count == 0) return;
 
     /* Upload globals. */
     sp_gl_globals globals;
@@ -868,7 +878,10 @@ static void gl_end_frame(void* self) {
     if ((loc = g->gl.GetUniformLocation(g->prog_post, "iResolution")) >= 0)
         g->gl.Uniform2f(loc, (float)g->fb_w, (float)g->fb_h);
     if ((loc = g->gl.GetUniformLocation(g->prog_post, "iTime")) >= 0)
-        g->gl.Uniform1f(loc, 0.0f); /* host advances via set_custom_shader cycle */
+        g->gl.Uniform1f(loc, g->time_seconds);
+    if ((loc = g->gl.GetUniformLocation(g->prog_post, "iFrame")) >= 0)
+        g->gl.Uniform1i(loc, g->frame);
+    g->frame++;
     g->gl.BindVertexArray(g->vao_post);
     g->gl.DrawArrays(GL_TRIANGLES, 0, 3);
     g->gl.BindVertexArray(0);
@@ -916,8 +929,37 @@ static bool gl_set_custom_shader(void* self, const char* glsl_source) {
 }
 
 static void gl_upload_glyph(void* self, const sp_glyph* g_in) {
-    /* Glyph atlas upload lands in the follow-up text-pass commit. */
-    (void)self; (void)g_in;
+    sp_renderer_gl* g = (sp_renderer_gl*)self;
+    if (!g || !g->atlas || !g_in || !g_in->pixels || !g->gl.TexSubImage2D) return;
+    const sp_atlas_slot* slot = sp_atlas_pack(g->atlas, g_in);
+    if (!slot || !g->tex_atlas) return;
+    g->gl.BindTexture(GL_TEXTURE_2D, g->tex_atlas);
+    g->gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    g->gl.PixelStorei(GL_UNPACK_ROW_LENGTH, g->atlas_w_px);
+    g->gl.TexSubImage2D(GL_TEXTURE_2D, 0, slot->x, slot->y, slot->w, slot->h,
+                        GL_RED, GL_UNSIGNED_BYTE,
+                        sp_atlas_pixels(g->atlas) +
+                            (size_t)slot->y * (size_t)g->atlas_w_px + slot->x);
+    g->gl.PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    g->gl.PixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    g->gl.BindTexture(GL_TEXTURE_2D, 0);
+}
+
+static const sp_atlas_slot* gl_ensure_glyph(sp_renderer_gl* g, uint32_t cp) {
+    const sp_atlas_slot* slot = sp_atlas_get(g->atlas, cp);
+    if (slot) return slot;
+    if (!g->font) return sp_atlas_get(g->atlas, 0);
+    sp_glyph glyph;
+    if (!sp_font_rasterize(g->font, cp, &glyph))
+        return sp_atlas_get(g->atlas, 0);
+    gl_upload_glyph(g, &glyph);
+    sp_font_free_glyph(&glyph);
+    slot = sp_atlas_get(g->atlas, cp);
+    return slot ? slot : sp_atlas_get(g->atlas, 0);
+}
+
+static bool gl_load_font(void* self, const uint8_t* ttf, size_t n, float px) {
+    return gl_reload_font((sp_renderer_gl*)self, ttf, n, px);
 }
 
 static const sp_renderer_vtbl SP_GL_VTBL = {
@@ -929,6 +971,7 @@ static const sp_renderer_vtbl SP_GL_VTBL = {
     .end_frame         = gl_end_frame,
     .set_custom_shader = gl_set_custom_shader,
     .upload_glyph      = gl_upload_glyph,
+    .load_font         = gl_load_font,
 };
 
 SPIRITTY_API sp_renderer* sp_renderer_gl_create(void) {

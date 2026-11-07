@@ -20,6 +20,7 @@ set_target_properties(spiritty_wasm PROPERTIES
 )
 
 target_link_libraries(spiritty_wasm PRIVATE spiritty)
+target_include_directories(spiritty_wasm PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # Embind needs RTTI; the rest of the project is -fno-rtti / -fno-exceptions.
 # We also bind embind.cpp so it can throw across the C++/JS boundary if it

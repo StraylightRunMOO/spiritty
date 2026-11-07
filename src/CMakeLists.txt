@@ -24,12 +24,26 @@ spiritty_embed_shaders(
     SHADERS ${SPIRITTY_SHADER_FILES}
 )
 
+set(SPIRITTY_BUILTIN_TTF_H ${CMAKE_CURRENT_BINARY_DIR}/builtin_ttf.h)
+add_custom_command(
+    OUTPUT ${SPIRITTY_BUILTIN_TTF_H}
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/embed_ttf.py
+            ${CMAKE_SOURCE_DIR}/third_party/ibm-plex-mono/IBMPlexMono-Regular.ttf
+            ${SPIRITTY_BUILTIN_TTF_H}
+    DEPENDS
+        ${CMAKE_SOURCE_DIR}/scripts/embed_ttf.py
+        ${CMAKE_SOURCE_DIR}/third_party/ibm-plex-mono/IBMPlexMono-Regular.ttf
+    COMMENT "Embedding IBM Plex Mono TTF"
+)
+
 set(SPIRITTY_CORE_SOURCES
     buffer.c
     parser.c
     selection.c
     terminal.c
     renderer_null.c
+    font.c
+    atlas.c
 )
 
 if(SPIRITTY_BUILD_GL_RENDERER)
@@ -46,7 +60,9 @@ endif()
 add_library(spiritty_core STATIC
     ${SPIRITTY_CORE_SOURCES}
     ${SPIRITTY_SHADERS_EMBED_H}
+    ${SPIRITTY_BUILTIN_TTF_H}
 )
+set_source_files_properties(font.c PROPERTIES OBJECT_DEPENDS ${SPIRITTY_BUILTIN_TTF_H})
 
 set_target_properties(spiritty_core PROPERTIES
     C_STANDARD          11
@@ -73,7 +89,13 @@ target_include_directories(spiritty_core
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+        ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+if(UNIX AND NOT EMSCRIPTEN)
+    target_link_libraries(spiritty_core PRIVATE m)
+endif()
 
 target_link_libraries(spiritty_core
     PRIVATE

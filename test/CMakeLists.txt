@@ -10,6 +10,7 @@ set(SPIRITTY_TEST_SOURCES
     test_selection.c
     test_terminal.c
     test_renderer.c
+    test_font.c
 )
 
 add_executable(spiritty_tests ${SPIRITTY_TEST_SOURCES})

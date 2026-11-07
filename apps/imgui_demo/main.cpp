@@ -40,8 +40,8 @@ namespace {
 
 constexpr int   kInitCols   = 100;
 constexpr int   kInitRows   = 30;
-constexpr float kCellWidth  = 8.0f;
-constexpr float kCellHeight = 16.0f;
+constexpr float kCellWidth  = 10.0f;
+constexpr float kCellHeight = 20.0f;
 
 /* Fallback URI when the user just hits "Connect" without typing one. */
 constexpr const char* kDefaultUri = "tcp://towel.blinkenlights.nl:23";

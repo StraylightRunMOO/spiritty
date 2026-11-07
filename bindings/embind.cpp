@@ -26,9 +26,11 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "spiritty/spiritty.h"
 #include "spiritty/spiritty_renderer.h"
+#include "font.h"
 
 using emscripten::class_;
 using emscripten::val;
@@ -57,6 +59,19 @@ public:
             return;
         }
 
+        /* Rasterize IBM Plex Mono (or a later loadFont TTF) at the
+         * framebuffer pixel size so glyphs are 1:1 with the backing store. */
+        float px = (float)opts.font_size * (dpr > 0.0f ? dpr : 1.0f);
+        if (px < 1.0f) px = 14.0f;
+        float cw = 0.0f, ch = 0.0f;
+        if (!sp_font_measure_builtin(px, &cw, &ch) || cw < 1.0f || ch < 1.0f) {
+            cw = 10.0f * (dpr > 0.0f ? dpr : 1.0f);
+            ch = 20.0f * (dpr > 0.0f ? dpr : 1.0f);
+        }
+        cell_w_ = cw;
+        cell_h_ = ch;
+        font_px_ = px;
+
         /* Bring the backend up. Without this, the vtable is attached
          * but every program / buffer handle in the renderer struct is
          * still zero, so the first render triggers
@@ -67,10 +82,13 @@ public:
         ropts.framebuffer_width   = fb_w;
         ropts.framebuffer_height  = fb_h;
         ropts.device_pixel_ratio  = dpr;
-        ropts.cell_width_px       = 8.0f;   /* builtin 8x16 bitmap font */
-        ropts.cell_height_px      = 16.0f;
+        ropts.cell_width_px       = cw;
+        ropts.cell_height_px      = ch;
+        ropts.font_size_px        = px;
         ropts.use_linear_blending   = true;
-        ropts.use_linear_correction = true;
+        /* Coverage already matches the destination; the Ghostty
+         * luminance correction fattens AA into gray boxes at 1:1. */
+        ropts.use_linear_correction = false;
 
         if (!renderer_->vt->init(renderer_->self, &ropts)) {
             sp_renderer_webgl_destroy(renderer_);
@@ -206,9 +224,41 @@ public:
         return sp_terminal_set_custom_shader(term_, arg);
     }
 
+    float cellWidth() const { return cell_w_; }
+    float cellHeight() const { return cell_h_; }
+
+    /* Replace the TTF. `data` is a Uint8Array of font bytes; empty
+     * reloads the builtin IBM Plex Mono. pixelHeight is framebuffer px. */
+    bool loadFont(val data, float pixel_height) {
+        if (!renderer_ || !renderer_->vt || !renderer_->vt->load_font)
+            return false;
+        float px = pixel_height > 0.0f ? pixel_height : font_px_;
+        if (px < 1.0f) px = 16.0f;
+        std::vector<uint8_t> bytes;
+        if (!data.isUndefined() && !data.isNull())
+            bytes = emscripten::convertJSArrayToNumberVector<uint8_t>(data);
+        const uint8_t* ptr = bytes.empty() ? nullptr : bytes.data();
+        if (!renderer_->vt->load_font(renderer_->self, ptr, bytes.size(), px))
+            return false;
+        font_px_ = px;
+        if (!bytes.empty()) {
+            sp_font* tmp = sp_font_create_from_memory(ptr, bytes.size(), px);
+            if (tmp) {
+                sp_font_cell_metrics(tmp, &cell_w_, &cell_h_, nullptr);
+                sp_font_destroy(tmp);
+            }
+        } else {
+            (void)sp_font_measure_builtin(px, &cell_w_, &cell_h_);
+        }
+        return true;
+    }
+
 private:
     sp_terminal* term_;
     sp_renderer* renderer_;
+    float        cell_w_  = 0.0f;
+    float        cell_h_  = 0.0f;
+    float        font_px_ = 0.0f;
 };
 
 /* sp_options has a NULL-defaulted const char* font_family and a
@@ -295,7 +345,10 @@ EMSCRIPTEN_BINDINGS(spiritty) {
         .function("selectionText",  &SpTerminalHandle::selectionText)
         .function("sendKey",        &SpTerminalHandle::sendKey)
         .function("sendMouse",      &SpTerminalHandle::sendMouse)
-        .function("setCustomShader",&SpTerminalHandle::setCustomShader);
+        .function("setCustomShader",&SpTerminalHandle::setCustomShader)
+        .function("cellWidth",      &SpTerminalHandle::cellWidth)
+        .function("cellHeight",     &SpTerminalHandle::cellHeight)
+        .function("loadFont",       &SpTerminalHandle::loadFont);
 
     function("createTerminal",  &createTerminal, emscripten::allow_raw_pointers());
     function("destroyTerminal", &destroyTerminal, emscripten::allow_raw_pointers());

@@ -79,6 +79,12 @@ export interface SpTerminal {
     sendKey(utf8: string): void;
     sendMouse(row: number, col: number, button: number, pressed: boolean): void;
 
+    /** Framebuffer pixels (includes devicePixelRatio). */
+    cellWidth(): number;
+    cellHeight(): number;
+    /** `data` is a TTF/OTF byte array; empty/undefined reloads IBM Plex Mono. */
+    loadFont(data: Uint8Array | null | undefined, pixelHeight: number): boolean;
+
     setCustomShader(glsl: string): boolean;
 
     /** Embind-provided dispose. Call exactly once. */

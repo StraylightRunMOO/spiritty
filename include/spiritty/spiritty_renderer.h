@@ -34,9 +34,13 @@ typedef struct {
     bool     has_color_glyphs;
 
     /* Cell metrics (px). Required by the GL backend for vertex transform.
-     * Both zero → backend picks a sensible default (8x16). */
+     * Both zero → backend measures the loaded TTF. */
     float    cell_width_px;
     float    cell_height_px;
+
+    /* Raster size in framebuffer pixels (font_size * devicePixelRatio).
+     * 0 → 0.8 * cell_height_px, or 16. */
+    float    font_size_px;
 
     /* GL function loader. Pass glfwGetProcAddress / emscripten_webgl_get_proc_address.
      * Optional for backends that don't need it (null renderer ignores). */
@@ -76,6 +80,9 @@ typedef struct sp_renderer_vtbl {
     void (*end_frame)(void* self);
     bool (*set_custom_shader)(void* self, const char* glsl_source);
     void (*upload_glyph)(void* self, const sp_glyph* glyph);
+    /* Replace the active TTF. pixel_height is framebuffer pixels.
+     * NULL bytes reloads the builtin IBM Plex Mono. */
+    bool (*load_font)(void* self, const uint8_t* ttf, size_t n, float pixel_height);
 } sp_renderer_vtbl;
 
 struct sp_renderer {

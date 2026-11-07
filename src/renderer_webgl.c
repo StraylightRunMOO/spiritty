@@ -23,11 +23,13 @@
 #include "spiritty/spiritty_renderer.h"
 #include "internal.h"
 #include "shaders_embed.h"
-#include "builtin_font.h"
+#include "font.h"
+#include "atlas.h"
 
 #include <GLES3/gl3.h>
 #include <emscripten/emscripten.h>
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,7 +82,10 @@ typedef struct {
 
     GLuint           prog_cell_bg;
     GLuint           prog_cell_text;
+    GLuint           prog_cursor;
     GLuint           prog_post;
+    GLint            loc_cursor_off;
+    GLint            loc_cursor_size;
 
     GLuint           vao_cell_bg;
     GLuint           vbo_cell_bg;
@@ -97,13 +102,17 @@ typedef struct {
     GLuint           tex_scene;
     int32_t          tex_scene_w, tex_scene_h;
 
-    /* Builtin glyph atlas (R8); identical layout to the GL backend. */
+    /* Dynamic R8 glyph atlas filled from a TTF via stb_truetype. */
     GLuint           tex_atlas;
     int32_t          atlas_w_px;
     int32_t          atlas_h_px;
     GLint            text_loc_atlas_size;
+    sp_font*         font;
+    sp_atlas*        atlas;
 
     char*            custom_post_src;
+    float            time_seconds;
+    int              frame;
 } sp_renderer_webgl;
 
 /* ---- GLSL preamble assembly ------------------------------------------ */
@@ -307,47 +316,63 @@ static size_t sp_webgl_pack_bg_instances(const sp_cell_batch* batch,
 
 /* ---- Text pass: builtin atlas + geometry + draw ---------------------- */
 
-static bool sp_webgl_init_text_atlas(sp_renderer_webgl* g) {
-    const int cols  = 1 + SP_BUILTIN_FONT_GLYPH_COUNT;
-    const int cellw = SP_BUILTIN_FONT_CELL_W;
-    const int cellh = SP_BUILTIN_FONT_CELL_H;
-    const int W     = cols * cellw;
-    const int H     = cellh;
-
-    uint8_t* px = (uint8_t*)calloc((size_t)W * (size_t)H, 1);
-    if (!px) return false;
-
-    #define SP_BUILTIN_BLIT(col_x, glyph_bytes) do {                  \
-        for (int y = 0; y < cellh; ++y) {                             \
-            uint8_t row = (glyph_bytes)[y];                           \
-            uint8_t* dst = px + (size_t)y * (size_t)W + (size_t)(col_x); \
-            for (int x = 0; x < cellw; ++x)                           \
-                dst[x] = (row & (uint8_t)(0x80u >> x)) ? 0xFF : 0x00; \
-        }                                                             \
-    } while (0)
-
-    SP_BUILTIN_BLIT(0, sp_builtin_font_fallback);
-    for (int i = 0; i < SP_BUILTIN_FONT_GLYPH_COUNT; ++i) {
-        SP_BUILTIN_BLIT((i + 1) * cellw, sp_builtin_font_8x16[i]);
-    }
-    #undef SP_BUILTIN_BLIT
-
-    g->atlas_w_px = W;
-    g->atlas_h_px = H;
-
-    glGenTextures(1, &g->tex_atlas);
-    glBindTexture(GL_TEXTURE_2D, g->tex_atlas);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, W, H, 0, GL_RED, GL_UNSIGNED_BYTE, px);
+static void webgl_bind_atlas_filter(void) {
+    /* NEAREST at 1:1 with the TTF coverage mask. LINEAR would smear
+     * stems across neighbouring framebuffer pixels. */
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+static bool webgl_upload_atlas_full(sp_renderer_webgl* g) {
+    if (!g->atlas) return false;
+    g->atlas_w_px = sp_atlas_width(g->atlas);
+    g->atlas_h_px = sp_atlas_height(g->atlas);
+    if (!g->tex_atlas) glGenTextures(1, &g->tex_atlas);
+    glBindTexture(GL_TEXTURE_2D, g->tex_atlas);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, g->atlas_w_px, g->atlas_h_px, 0,
+                 GL_RED, GL_UNSIGNED_BYTE, sp_atlas_pixels(g->atlas));
+    webgl_bind_atlas_filter();
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
-
-    free(px);
     return true;
+}
+
+static bool webgl_reload_font(sp_renderer_webgl* g, const uint8_t* ttf, size_t n, float px) {
+    if (px < 1.0f) {
+        px = g->opts.cell_height_px > 0.0f ? g->opts.cell_height_px * 0.8f : 16.0f;
+    }
+    sp_font* font = (ttf && n)
+        ? sp_font_create_from_memory(ttf, n, px)
+        : sp_font_create_builtin(px);
+    if (!font) return false;
+    sp_atlas* atlas = sp_atlas_create(1024, 1024);
+    if (!atlas) {
+        sp_font_destroy(font);
+        return false;
+    }
+    if (!sp_font_seed_ascii(font, atlas)) {
+        sp_atlas_destroy(atlas);
+        sp_font_destroy(font);
+        return false;
+    }
+    float cw = 0.0f, ch = 0.0f;
+    sp_font_cell_metrics(font, &cw, &ch, NULL);
+    if (cw > 0.0f) g->opts.cell_width_px  = cw;
+    if (ch > 0.0f) g->opts.cell_height_px = ch;
+
+    sp_font_destroy(g->font);
+    sp_atlas_destroy(g->atlas);
+    g->font  = font;
+    g->atlas = atlas;
+    return webgl_upload_atlas_full(g);
+}
+
+static bool sp_webgl_init_text_atlas(sp_renderer_webgl* g) {
+    float px = g->opts.font_size_px;
+    return webgl_reload_font(g, NULL, 0, px);
 }
 
 static void sp_webgl_init_cell_text_geom(sp_renderer_webgl* g) {
@@ -382,11 +407,11 @@ static void sp_webgl_init_cell_text_geom(sp_renderer_webgl* g) {
     glBindVertexArray(0);
 }
 
-static size_t sp_webgl_pack_text_instances(const sp_cell_batch* batch,
-                                           sp_webgl_text_inst* out) {
-    const int cellw = SP_BUILTIN_FONT_CELL_W;
-    const int cellh = SP_BUILTIN_FONT_CELL_H;
+static const sp_atlas_slot* webgl_ensure_glyph(sp_renderer_webgl* g, uint32_t cp);
 
+static size_t sp_webgl_pack_text_instances(sp_renderer_webgl* g,
+                                           const sp_cell_batch* batch,
+                                           sp_webgl_text_inst* out) {
     size_t n = 0;
     for (int32_t r = 0; r < batch->rows; ++r) {
         for (int32_t c = 0; c < batch->cols; ++c) {
@@ -394,28 +419,23 @@ static size_t sp_webgl_pack_text_instances(const sp_cell_batch* batch,
             uint32_t cp = cell->codepoint;
             if (cp == 0 || cp == ' ') continue;
 
-            int atlas_col;
-            if (cp >= (uint32_t)SP_BUILTIN_FONT_FIRST_CP &&
-                cp <= (uint32_t)SP_BUILTIN_FONT_LAST_CP) {
-                atlas_col = 1 + (int)(cp - (uint32_t)SP_BUILTIN_FONT_FIRST_CP);
-            } else {
-                atlas_col = 0;
-            }
+            const sp_atlas_slot* slot = webgl_ensure_glyph(g, cp);
+            if (!slot) continue;
 
             sp_webgl_text_inst* inst = &out[n++];
-            inst->grid_x   = (float)c;
-            inst->grid_y   = (float)r;
-            inst->glyph_w  = (float)cellw;
-            inst->glyph_h  = (float)cellh;
-            inst->bearing_x = 0.0f;
-            inst->bearing_y = 0.0f;
-            inst->atlas_x  = (float)(atlas_col * cellw);
-            inst->atlas_y  = 0.0f;
-            inst->atlas_w  = (float)cellw;
-            inst->atlas_h  = (float)cellh;
+            inst->grid_x    = (float)c;
+            inst->grid_y    = (float)r;
+            inst->glyph_w   = (float)slot->w;
+            inst->glyph_h   = (float)slot->h;
+            inst->bearing_x = (float)slot->bearing_x;
+            inst->bearing_y = (float)slot->bearing_y;
+            inst->atlas_x   = (float)slot->x;
+            inst->atlas_y   = (float)slot->y;
+            inst->atlas_w   = (float)slot->w;
+            inst->atlas_h   = (float)slot->h;
             sp_webgl_color_unpack(cell->attrs.fg, &inst->fg_r);
             sp_webgl_color_unpack(cell->attrs.bg, &inst->bg_r);
-            inst->flags    = 0;
+            inst->flags     = 0;
         }
     }
     return n;
@@ -427,8 +447,7 @@ static bool webgl_init(void* self, const sp_renderer_opts* opts) {
     sp_renderer_webgl* g = (sp_renderer_webgl*)self;
     if (!opts) return false;
     g->opts = *opts;
-    if (g->opts.cell_width_px  <= 0.0f) g->opts.cell_width_px  = 8.0f;
-    if (g->opts.cell_height_px <= 0.0f) g->opts.cell_height_px = 16.0f;
+    /* Cell metrics filled in by webgl_reload_font from the TTF if still 0. */
     g->fb_w = opts->framebuffer_width;
     g->fb_h = opts->framebuffer_height;
 
@@ -440,6 +459,10 @@ static bool webgl_init(void* self, const sp_renderer_opts* opts) {
     if (!g->prog_cell_bg) return false;
     g->prog_cell_text = sp_webgl_build_program(g, sp_shader_cell_text_v, sp_shader_cell_text_f, true);
     if (!g->prog_cell_text) return false;
+    g->prog_cursor = sp_webgl_build_program(g, sp_shader_cursor_v, sp_shader_cursor_f, true);
+    if (!g->prog_cursor) return false;
+    g->loc_cursor_off  = glGetUniformLocation(g->prog_cursor, "u_offset_px");
+    g->loc_cursor_size = glGetUniformLocation(g->prog_cursor, "u_size_px");
     g->prog_post    = sp_webgl_build_program(g, sp_shader_post_v,    sp_shader_post_f,    false);
     if (!g->prog_post) return false;
 
@@ -479,6 +502,7 @@ static void webgl_shutdown(void* self) {
     if (!g->initialized) return;
     if (g->prog_cell_bg)   glDeleteProgram(g->prog_cell_bg);
     if (g->prog_cell_text) glDeleteProgram(g->prog_cell_text);
+    if (g->prog_cursor)    glDeleteProgram(g->prog_cursor);
     if (g->prog_post)      glDeleteProgram(g->prog_post);
     if (g->vbo_cell_bg)    glDeleteBuffers(1, &g->vbo_cell_bg);
     if (g->vao_cell_bg)    glDeleteVertexArrays(1, &g->vao_cell_bg);
@@ -489,6 +513,8 @@ static void webgl_shutdown(void* self) {
     if (g->tex_atlas)      glDeleteTextures(1, &g->tex_atlas);
     sp_webgl_destroy_scene_fbo(g);
     free(g->custom_post_src);
+    sp_font_destroy(g->font);
+    sp_atlas_destroy(g->atlas);
     memset(g, 0, sizeof(*g));
 }
 
@@ -512,7 +538,9 @@ static void webgl_begin_frame(void* self) {
 
 static void webgl_draw_cells(void* self, const sp_cell_batch* batch) {
     sp_renderer_webgl* g = (sp_renderer_webgl*)self;
-    if (!g->in_frame || !batch || batch->cell_count == 0) return;
+    if (!g->in_frame || !batch) return;
+    g->time_seconds = batch->time_seconds;
+    if (batch->cell_count == 0) return;
 
     sp_webgl_globals globals;
     memset(&globals, 0, sizeof globals);
@@ -527,6 +555,10 @@ static void webgl_draw_cells(void* self, const sp_cell_batch* batch) {
     globals.cursor_xy[1]      = (float)batch->cursor_row;
     globals.cursor_visible    = batch->cursor_visible ? 1 : 0;
     globals.min_contrast      = 1.0f;
+    globals.cursor_color[0]   = 0.91f;
+    globals.cursor_color[1]   = 0.75f;
+    globals.cursor_color[2]   = 0.48f;
+    globals.cursor_color[3]   = 1.0f;
     glBindBuffer(GL_UNIFORM_BUFFER, g->ubo_globals);
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(globals), &globals);
 
@@ -553,7 +585,7 @@ static void webgl_draw_cells(void* self, const sp_cell_batch* batch) {
     /* Text pass — one instance per renderable cell. */
     sp_webgl_text_inst* tinst = (sp_webgl_text_inst*)malloc(batch->cell_count * sizeof(sp_webgl_text_inst));
     if (!tinst) return;
-    size_t tn = sp_webgl_pack_text_instances(batch, tinst);
+    size_t tn = sp_webgl_pack_text_instances(g, batch, tinst);
     if (tn > 0) {
         size_t bytes = tn * sizeof(sp_webgl_text_inst);
         glBindBuffer(GL_ARRAY_BUFFER, g->vbo_cell_text);
@@ -576,6 +608,20 @@ static void webgl_draw_cells(void* self, const sp_cell_batch* batch) {
         glUseProgram(0);
     }
     free(tinst);
+
+    if (batch->cursor_visible &&
+        fmodf(g->time_seconds, 1.05f) < 0.62f &&
+        g->prog_cursor) {
+        float cw = g->opts.cell_width_px;
+        float ch = g->opts.cell_height_px;
+        glUseProgram(g->prog_cursor);
+        if (g->loc_cursor_off  >= 0) glUniform2f(g->loc_cursor_off, 0.0f, ch - 2.0f);
+        if (g->loc_cursor_size >= 0) glUniform2f(g->loc_cursor_size, cw, 2.0f);
+        glBindVertexArray(g->vao_post);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(0);
+        glUseProgram(0);
+    }
 }
 
 static void webgl_end_frame(void* self) {
@@ -592,9 +638,12 @@ static void webgl_end_frame(void* self) {
     glBindTexture(GL_TEXTURE_2D, g->tex_scene);
     GLint loc;
     if ((loc = glGetUniformLocation(g->prog_post, "iResolution")) >= 0)
-        glUniform2f(loc, (float)g->fb_w, (float)g->fb_h);
+        glUniform3f(loc, (float)g->fb_w, (float)g->fb_h, 1.0f);
     if ((loc = glGetUniformLocation(g->prog_post, "iTime")) >= 0)
-        glUniform1f(loc, 0.0f);
+        glUniform1f(loc, g->time_seconds);
+    if ((loc = glGetUniformLocation(g->prog_post, "iFrame")) >= 0)
+        glUniform1i(loc, g->frame);
+    g->frame++;
     glBindVertexArray(g->vao_post);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
@@ -638,7 +687,37 @@ static bool webgl_set_custom_shader(void* self, const char* glsl_source) {
 }
 
 static void webgl_upload_glyph(void* self, const sp_glyph* g_in) {
-    (void)self; (void)g_in;
+    sp_renderer_webgl* g = (sp_renderer_webgl*)self;
+    if (!g || !g->atlas || !g_in || !g_in->pixels) return;
+    const sp_atlas_slot* slot = sp_atlas_pack(g->atlas, g_in);
+    if (!slot || !g->tex_atlas) return;
+    glBindTexture(GL_TEXTURE_2D, g->tex_atlas);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, g->atlas_w_px);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, slot->x, slot->y, slot->w, slot->h,
+                    GL_RED, GL_UNSIGNED_BYTE,
+                    sp_atlas_pixels(g->atlas) +
+                        (size_t)slot->y * (size_t)g->atlas_w_px + slot->x);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+static const sp_atlas_slot* webgl_ensure_glyph(sp_renderer_webgl* g, uint32_t cp) {
+    const sp_atlas_slot* slot = sp_atlas_get(g->atlas, cp);
+    if (slot) return slot;
+    if (!g->font) return sp_atlas_get(g->atlas, 0);
+    sp_glyph glyph;
+    if (!sp_font_rasterize(g->font, cp, &glyph))
+        return sp_atlas_get(g->atlas, 0);
+    webgl_upload_glyph(g, &glyph);
+    sp_font_free_glyph(&glyph);
+    slot = sp_atlas_get(g->atlas, cp);
+    return slot ? slot : sp_atlas_get(g->atlas, 0);
+}
+
+static bool webgl_load_font(void* self, const uint8_t* ttf, size_t n, float px) {
+    return webgl_reload_font((sp_renderer_webgl*)self, ttf, n, px);
 }
 
 static const sp_renderer_vtbl SP_WEBGL_VTBL = {
@@ -650,6 +729,7 @@ static const sp_renderer_vtbl SP_WEBGL_VTBL = {
     .end_frame         = webgl_end_frame,
     .set_custom_shader = webgl_set_custom_shader,
     .upload_glyph      = webgl_upload_glyph,
+    .load_font         = webgl_load_font,
 };
 
 SPIRITTY_API sp_renderer* sp_renderer_webgl_create(void) {

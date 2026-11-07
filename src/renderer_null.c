@@ -151,6 +151,11 @@ static void null_upload_glyph(void* self, const sp_glyph* g) {
     (void)g;
 }
 
+static bool null_load_font(void* self, const uint8_t* ttf, size_t n, float px) {
+    (void)self; (void)ttf; (void)n; (void)px;
+    return true;
+}
+
 static const sp_renderer_vtbl SP_NULL_VTBL = {
     .init              = null_init,
     .shutdown          = null_shutdown,
@@ -160,6 +165,7 @@ static const sp_renderer_vtbl SP_NULL_VTBL = {
     .end_frame         = null_end_frame,
     .set_custom_shader = null_set_custom_shader,
     .upload_glyph      = null_upload_glyph,
+    .load_font         = null_load_font,
 };
 
 /* -------- Public factory + introspection helpers -------- */
