@@ -29,6 +29,17 @@ export interface SpCursor {
     col: number;
 }
 
+/** Event emitted by the terminal through setEventCb. `data` is upstream
+ *  bytes the host should forward to the application (telnet, PTY, VM). */
+export type SpEvent =
+    | { kind: "data";      bytes: Uint8Array }
+    | { kind: "resize";    cols: number; rows: number }
+    | { kind: "title";     text: string }
+    | { kind: "bell" }
+    | { kind: "cursor";    row: number; col: number; visible: boolean }
+    | { kind: "scroll";    top: number }
+    | { kind: "selection" };
+
 /** sp_sel_mode in spiritty.h. The C enum is `int`-sized; we expose
  *  numeric literals so `verbatimModuleSyntax` can erase the import. */
 export type SpSelMode = 0 | 1 | 2 | 3;
@@ -77,11 +88,28 @@ export interface SpTerminal {
 
     /** UTF-8 encoded as a JS string; the C side measures by byte length. */
     sendKey(utf8: string): void;
+    /** button: 0/1/2 = left/middle/right (press+release); 3 = motion no-button;
+     *  64/65 = wheel up/down (press-only). Gated by DECSET 9/1000/1002/1003. */
     sendMouse(row: number, col: number, button: number, pressed: boolean): void;
+    /** Bitmask of DECSET mouse modes currently enabled. bit0=X10(9),
+     *  bit1=1000, bit2=1002, bit3=1003, bit4=SGR(1006), bit5=URXVT(1015). */
+    mouseMode(): number;
     /** Delivers `text` as a paste. If DECSET 2004 (bracketed paste) is
      *  active the C side wraps the payload in ESC[200~ / ESC[201~.
      *  Embedded ESC bytes are stripped regardless, matching xterm. */
     sendPaste(text: string): void;
+
+    /** OSC 8 hyperlink hit-test. Returns the URI string at `(row, col)`
+     *  (viewport coords; respects scroll offset) or an empty string if
+     *  no hyperlink is set on that cell. Scrollback cells always return
+     *  "" (URIs are not carried into the ring in v1). */
+    uriAt(row: number, col: number): string;
+
+    /** Subscribe to terminal-generated events. `cb` receives:
+     *    { kind: "data" | "resize" | "title" | "bell" | "cursor" | "scroll" | "selection", ... }
+     *  "data" carries a fresh Uint8Array (bytes). Pass null/undefined to
+     *  unsubscribe. */
+    setEventCb(cb: ((ev: SpEvent) => void) | null | undefined): void;
 
     /** Scrollback viewport. `offset` = lines above the live bottom; 0 = pinned
      *  to bottom (normal). Any subsequent write() resets to 0. */

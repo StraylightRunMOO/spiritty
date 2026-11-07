@@ -243,6 +243,33 @@ SPIRITTY_API void     sp_terminal_set_color      (sp_terminal* t,
 SPIRITTY_API uint32_t sp_terminal_get_color      (const sp_terminal* t, int role);
 SPIRITTY_API void     sp_terminal_reset_color    (sp_terminal* t, int role);
 
+/* ---- OSC 8 hyperlink hit-test ----------------------------------------- */
+
+/* Returns the URI string at the given viewport cell (respects scrollback
+ * offset), or NULL if no OSC 8 hyperlink is set on that cell. The returned
+ * pointer is owned by the terminal and valid until the next OSC 8 that
+ * recycles its intern slot — copy it if you need to keep it. Scrollback
+ * rows return NULL (v1 does not carry URIs into the ring). */
+SPIRITTY_API const char* sp_terminal_hit_test_uri(const sp_terminal* t,
+                                                  int32_t row, int32_t col);
+
+/* ---- Mouse reporting (DECSET 9 / 1000 / 1002 / 1003 / 1006 / 1015) --- */
+
+/* Host wants to tell the terminal "mouse was at (row,col), button b,
+ * pressed/released". button 3 means "motion over no button". For wheels,
+ * pass button 64 (up) or 65 (down) with pressed=true. The terminal emits
+ * an SP_EV_DATA event only if the currently-enabled reporting mode cares
+ * about this event; otherwise this call is a no-op. */
+/* (also see declaration of sp_terminal_send_mouse further up in this file) */
+
+/* Programmatic access to the mouse-reporting flags, for hosts that want
+ * to adapt their own event stream (e.g. only hook up a global motion
+ * listener when DECSET 1003 is on). Returns a bitmask:
+ *   bit 0 = X10 (9), bit 1 = button-event (1000), bit 2 = button-motion
+ *   (1002), bit 3 = any-motion (1003), bit 4 = SGR (1006), bit 5 = URXVT
+ *   (1015). */
+SPIRITTY_API int  sp_terminal_mouse_mode(const sp_terminal* t);
+
 /* ---- Shader hot-swap (forwards to attached renderer) ------------------ */
 
 SPIRITTY_API bool sp_terminal_set_custom_shader(sp_terminal* t,

@@ -330,6 +330,11 @@ struct sp_buffer {
      * scrollback. Set by the host for wheel / PgUp; reset to 0 on any
      * write (xterm "snap to bottom on output"). */
     size_t        scroll_offset;
+    /* Parallel per-cell URI intern-id grid. 0 == no URI. Co-resized with
+     * the active screen; written by the parser's print path; shifted by
+     * scroll_up/scroll_down; zeroed on clear/insert/delete. NOT carried
+     * into scrollback — hit-tests on scrolled-up rows return 0. */
+    uint16_t*     uri_grid;
 };
 
 sp_buffer* sp_buffer_create(int32_t rows, int32_t cols, int32_t sb_max) {
@@ -351,6 +356,9 @@ sp_buffer* sp_buffer_create(int32_t rows, int32_t cols, int32_t sb_max) {
     sp_pool_swap_out(prev);
 
     sb_init(&b->sb, (size_t)(sb_max < 0 ? 0 : sb_max));
+    b->uri_grid = (uint16_t*)calloc((size_t)rows * (size_t)cols, sizeof(uint16_t));
+    /* uri_grid is best-effort — we don't fail buffer creation on OOM here;
+     * hit-tests just return 0 when the grid is absent. */
     return b;
 }
 
@@ -364,6 +372,7 @@ void sp_buffer_destroy(sp_buffer* b) {
     sb_free(&b->sb);
     sp_pool_swap_out(prev);
     sp_pool_drain(&b->pool);
+    free(b->uri_grid);
     free(b);
 }
 
@@ -422,16 +431,41 @@ void sp_buffer_resize(sp_buffer* b, int32_t rows, int32_t cols, sp_cell_attrs de
     }
     b->rows = rows;
     sp_pool_swap_out(prev);
+
+    /* URI grid: reallocate to new dimensions (dropping all tags on resize
+     * — the old content is reflowed anyway so coordinates would be stale). */
+    free(b->uri_grid);
+    b->uri_grid = (uint16_t*)calloc((size_t)b->rows * (size_t)b->cols, sizeof(uint16_t));
+}
+
+static void sp_buf_uri_zero_row(sp_buffer* b, int32_t row) {
+    if (!b || !b->uri_grid || row < 0 || row >= b->rows) return;
+    memset(b->uri_grid + (size_t)row * (size_t)b->cols, 0,
+           (size_t)b->cols * sizeof(uint16_t));
+}
+
+static void sp_buf_uri_zero_cells(sp_buffer* b, int32_t row,
+                                  int32_t col_start, int32_t col_end) {
+    if (!b || !b->uri_grid || row < 0 || row >= b->rows) return;
+    if (col_start < 0) col_start = 0;
+    if (col_end > b->cols) col_end = b->cols;
+    if (col_end <= col_start) return;
+    memset(b->uri_grid + (size_t)row * (size_t)b->cols + col_start, 0,
+           (size_t)(col_end - col_start) * sizeof(uint16_t));
 }
 
 void sp_buffer_clear(sp_buffer* b, sp_cell_attrs def) {
     if (!b) return;
     for (int32_t i = 0; i < b->rows; ++i) sp_line_clear(&b->visible[i], def);
+    if (b->uri_grid)
+        memset(b->uri_grid, 0,
+               (size_t)b->rows * (size_t)b->cols * sizeof(uint16_t));
 }
 
 void sp_buffer_clear_line(sp_buffer* b, int32_t row, sp_cell_attrs def) {
     sp_line* ln = sp_buffer_line(b, row);
     if (ln) sp_line_clear(ln, def);
+    sp_buf_uri_zero_row(b, row);
 }
 
 void sp_buffer_clear_range(sp_buffer* b,
@@ -448,6 +482,7 @@ void sp_buffer_clear_range(sp_buffer* b,
         int32_t s = (r == r0) ? c0 : 0;
         int32_t e = (r == r1) ? c1 + 1 : ln->cols;
         sp_line_clear_range(ln, s, e, def);
+        sp_buf_uri_zero_cells(b, r, s, e);
     }
 }
 
@@ -468,6 +503,13 @@ void sp_buffer_scroll_up(sp_buffer* b, int32_t count, sp_cell_attrs def) {
         for (int32_t c = 0; c < b->cols; ++c) nl.cells[c].attrs = def;
         b->visible[b->rows - 1] = nl;
     }
+    if (b->uri_grid) {
+        size_t stride = (size_t)b->cols;
+        size_t keep = (size_t)(b->rows - count) * stride;
+        memmove(b->uri_grid, b->uri_grid + (size_t)count * stride,
+                keep * sizeof(uint16_t));
+        memset(b->uri_grid + keep, 0, (size_t)count * stride * sizeof(uint16_t));
+    }
     sp_buffer_mark_all_dirty(b);
 }
 
@@ -483,6 +525,13 @@ void sp_buffer_scroll_down(sp_buffer* b, int32_t count, sp_cell_attrs def) {
         sp_line_init(&nl, b->cols);
         for (int32_t c = 0; c < b->cols; ++c) nl.cells[c].attrs = def;
         b->visible[0] = nl;
+    }
+    if (b->uri_grid) {
+        size_t stride = (size_t)b->cols;
+        size_t keep = (size_t)(b->rows - count) * stride;
+        memmove(b->uri_grid + (size_t)count * stride, b->uri_grid,
+                keep * sizeof(uint16_t));
+        memset(b->uri_grid, 0, (size_t)count * stride * sizeof(uint16_t));
     }
     sp_buffer_mark_all_dirty(b);
 }
@@ -501,6 +550,15 @@ void sp_buffer_insert_lines(sp_buffer* b, int32_t row, int32_t count,
         for (int32_t c = 0; c < b->cols; ++c) nl.cells[c].attrs = def;
         b->visible[row] = nl;
     }
+    if (b->uri_grid) {
+        size_t stride = (size_t)b->cols;
+        size_t moved = (size_t)(b->rows - row - count) * stride;
+        memmove(b->uri_grid + (size_t)(row + count) * stride,
+                b->uri_grid + (size_t)row * stride,
+                moved * sizeof(uint16_t));
+        memset(b->uri_grid + (size_t)row * stride, 0,
+               (size_t)count * stride * sizeof(uint16_t));
+    }
     sp_buffer_mark_all_dirty(b);
 }
 
@@ -517,6 +575,15 @@ void sp_buffer_delete_lines(sp_buffer* b, int32_t row, int32_t count,
         sp_line_init(&nl, b->cols);
         for (int32_t c = 0; c < b->cols; ++c) nl.cells[c].attrs = def;
         b->visible[b->rows - 1] = nl;
+    }
+    if (b->uri_grid) {
+        size_t stride = (size_t)b->cols;
+        size_t moved = (size_t)(b->rows - row - count) * stride;
+        memmove(b->uri_grid + (size_t)row * stride,
+                b->uri_grid + (size_t)(row + count) * stride,
+                moved * sizeof(uint16_t));
+        memset(b->uri_grid + (size_t)(b->rows - count) * stride, 0,
+               (size_t)count * stride * sizeof(uint16_t));
     }
     sp_buffer_mark_all_dirty(b);
 }
@@ -536,6 +603,11 @@ void sp_buffer_insert_chars(sp_buffer* b, int32_t row, int32_t col,
         ln->cells[i].width     = 1;
         ln->cells[i].attrs     = def;
     }
+    if (b->uri_grid) {
+        uint16_t* r = b->uri_grid + (size_t)row * (size_t)b->cols;
+        for (int32_t i = ln->cols - 1; i >= col + count; --i) r[i] = r[i - count];
+        for (int32_t i = col; i < col + count; ++i) r[i] = 0;
+    }
     ln->dirty = true;
 }
 
@@ -554,6 +626,11 @@ void sp_buffer_delete_chars(sp_buffer* b, int32_t row, int32_t col,
         ln->cells[i].width     = 1;
         ln->cells[i].attrs     = def;
     }
+    if (b->uri_grid) {
+        uint16_t* r = b->uri_grid + (size_t)row * (size_t)b->cols;
+        for (int32_t i = col; i < ln->cols - count; ++i) r[i] = r[i + count];
+        for (int32_t i = ln->cols - count; i < ln->cols; ++i) r[i] = 0;
+    }
     ln->dirty = true;
 }
 
@@ -565,6 +642,23 @@ void sp_buffer_write_cp(sp_buffer* b, int32_t row, int32_t col,
     c->width     = 1;
     c->attrs     = attrs;
     if (row >= 0 && row < b->rows) b->visible[row].dirty = true;
+}
+
+void sp_buffer_set_uri(sp_buffer* b, int32_t row, int32_t col, uint16_t id) {
+    if (!b || !b->uri_grid || row < 0 || row >= b->rows ||
+        col < 0 || col >= b->cols) return;
+    b->uri_grid[(size_t)row * (size_t)b->cols + (size_t)col] = id;
+}
+
+uint16_t sp_buffer_get_uri(const sp_buffer* b, int32_t row, int32_t col) {
+    if (!b || !b->uri_grid || row < 0 || row >= b->rows ||
+        col < 0 || col >= b->cols) return 0;
+    return b->uri_grid[(size_t)row * (size_t)b->cols + (size_t)col];
+}
+
+void sp_buffer_clear_uris(sp_buffer* b) {
+    if (!b || !b->uri_grid) return;
+    memset(b->uri_grid, 0, (size_t)b->rows * (size_t)b->cols * sizeof(uint16_t));
 }
 
 size_t sp_buffer_scrollback_size(const sp_buffer* b) {

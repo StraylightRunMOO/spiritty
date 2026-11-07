@@ -8,6 +8,7 @@
 
 #include "internal.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -112,6 +113,7 @@ sp_terminal* sp_terminal_create(const sp_options* opts) {
     t->origin_mode = false;
     t->cursor_visible = true;
     t->bracketed_paste = false;
+    t->mouse.last_button = -1;
     sp_palette_reset(t);
 
     t->buf = sp_buffer_create(t->opts.rows, t->opts.cols, t->opts.scrollback_lines);
@@ -133,6 +135,7 @@ void sp_terminal_destroy(sp_terminal* t) {
     sp_selmgr_destroy(t->selmgr);
     sp_parser_destroy(t->parser);
     sp_buffer_destroy(t->buf);
+    for (int i = 0; i < SP_URI_CAP; i++) free(t->uri_table.uris[i]);
     free(t->render_scratch);
     free(t);
 }
@@ -346,11 +349,203 @@ void sp_terminal_send_key(sp_terminal* t, const char* utf8, size_t len) {
     sp_terminal_emit(t, &ev);
 }
 
+/* Encode button + modifier mask into the low 7 bits xterm expects.
+ *
+ *   bits 0-1 : button (0=left,1=middle,2=right,3=release-in-X10)
+ *   bit  2   : Shift
+ *   bit  3   : Meta/Alt
+ *   bit  4   : Control
+ *   bit  5   : Motion flag (added when kind == motion)
+ *   bit  6   : Wheel flag (buttons 64/65)
+ *
+ * `button` values the host sends:
+ *   0,1,2 = left/middle/right (press/release decided by `pressed`)
+ *   3     = motion with no button
+ *   64,65 = wheel up/down (press-only)
+ * `mods` is bit 0=Shift, bit 1=Alt, bit 2=Ctrl. */
+static int sp_mouse_build_cb(int button, int mods, bool motion, bool released_x10) {
+    int cb;
+    if (button >= 64) {
+        cb = button;          /* wheel codes include the 64/65 already */
+    } else if (button == 3) {
+        cb = 3;               /* motion no-button; X10 treats as release */
+    } else {
+        cb = released_x10 ? 3 : (button & 0x03);
+    }
+    if (mods & 1) cb |= 4;
+    if (mods & 2) cb |= 8;
+    if (mods & 4) cb |= 16;
+    if (motion)   cb |= 32;
+    return cb;
+}
+
+/* X10 fallback (CSI M <Cb+32> <Cx+32> <Cy+32>). Column + row are clamped to
+ * the legacy 8-bit range (223), beyond which X10 simply cannot encode. */
+static int sp_mouse_encode_x10(int cb, int col1, int row1, char out[8]) {
+    if (col1 > 223) col1 = 223;
+    if (row1 > 223) row1 = 223;
+    out[0] = 0x1B;
+    out[1] = '[';
+    out[2] = 'M';
+    out[3] = (char)(cb + 32);
+    out[4] = (char)(col1 + 32);
+    out[5] = (char)(row1 + 32);
+    return 6;
+}
+
 void sp_terminal_send_mouse(sp_terminal* t, int32_t row, int32_t col,
                             int32_t button, bool pressed) {
-    (void)t; (void)row; (void)col; (void)button; (void)pressed;
-    /* Mouse-reporting (X10/SGR) lives behind DECSET 1000/1006; we'll wire
-     * the encoder up when those modes flip on. For now: drop. */
+    if (!t) return;
+    sp_mouse_state* m = &t->mouse;
+
+    /* Nothing listening → nothing to send. */
+    if (!(m->x10 || m->button_event || m->button_motion || m->any_motion)) return;
+
+    /* Clamp to visible grid; terminals number cells 1-based. */
+    int32_t rows = sp_buffer_rows(t->buf);
+    int32_t cols = sp_buffer_cols(t->buf);
+    if (rows <= 0 || cols <= 0) return;
+    if (row < 0) row = 0; else if (row >= rows) row = rows - 1;
+    if (col < 0) col = 0; else if (col >= cols) col = cols - 1;
+
+    /* Motion: button == 3 is the "motion over no button" marker; otherwise
+     * `pressed` tells us press vs release. */
+    bool motion = (button == 3);
+    bool is_wheel = (button == 64 || button == 65);
+
+    /* Which mode flags gate what gets sent: */
+    if (!motion) {
+        if (!(m->button_event || m->button_motion || m->any_motion) && !m->x10) return;
+        /* X10 is press-only. */
+        if (m->x10 && !m->button_event && !m->button_motion && !m->any_motion && !pressed)
+            return;
+    } else {
+        /* Motion events only if 1002 (while held) or 1003 (always). */
+        if (!m->button_motion && !m->any_motion) return;
+        if (m->button_motion && !m->any_motion) {
+            /* only report motion while a button is held */
+            if (m->last_button < 0 || m->last_button == 3) return;
+        }
+    }
+
+    /* De-dup motion to the same cell so dragging doesn't drown the host. */
+    if (motion && row == m->last_row && col == m->last_col) return;
+
+    int cb;
+    if (motion) {
+        int held = (m->last_button >= 0 && m->last_button != 3) ? m->last_button : 3;
+        cb = sp_mouse_build_cb(held, 0, true, false);
+    } else {
+        cb = sp_mouse_build_cb(button, 0, false, !pressed && !is_wheel);
+    }
+
+    char buf[32];
+    int n = 0;
+    if (m->encode_sgr) {
+        /* CSI < Cb ; Cx ; Cy  M (press/motion) or m (release). */
+        char final = (!motion && !pressed && !is_wheel) ? 'm' : 'M';
+        int raw_b = cb;
+        if (!motion && !pressed && !is_wheel) raw_b = cb & ~3; /* strip the X10 release marker */
+        n = snprintf(buf, sizeof buf, "\x1b[<%d;%d;%d%c",
+                     raw_b, col + 1, row + 1, final);
+    } else if (m->encode_urxvt) {
+        /* CSI Cb+32 ; Cx ; Cy M */
+        n = snprintf(buf, sizeof buf, "\x1b[%d;%d;%dM",
+                     cb + 32, col + 1, row + 1);
+    } else {
+        n = sp_mouse_encode_x10(cb, col + 1, row + 1, buf);
+    }
+    if (n > 0 && n < (int)sizeof buf) {
+        sp_event ev = {
+            .kind = SP_EV_DATA,
+            .as.data.bytes = (const uint8_t*)buf,
+            .as.data.len   = (size_t)n,
+        };
+        sp_terminal_emit(t, &ev);
+    }
+
+    /* Remember state for motion fill-in. */
+    if (!motion) {
+        if (pressed && !is_wheel) m->last_button = button;
+        else if (!pressed && !is_wheel) m->last_button = -1;
+    }
+    m->last_row = row;
+    m->last_col = col;
+}
+
+/* ---- OSC 8 URI intern table ------------------------------------------- */
+
+uint16_t sp_terminal_uri_intern(sp_terminal* t, const char* s, size_t n) {
+    if (!t || !s || n == 0) return 0;
+    /* Dedup: linear scan — 256 cap keeps it cheap and the common case
+     * (same URI tagged on many cells) wins hugely. */
+    for (int i = 0; i < SP_URI_CAP; i++) {
+        const char* u = t->uri_table.uris[i];
+        if (u && strlen(u) == n && memcmp(u, s, n) == 0) {
+            return (uint16_t)(i + 1);
+        }
+    }
+    /* Insert at the ring-advance slot, evicting what was there. Simpler
+     * than true LRU; a chat session almost never recycles that many URIs. */
+    int slot = t->uri_table.next % SP_URI_CAP;
+    char* copy = (char*)malloc(n + 1);
+    if (!copy) return 0;
+    memcpy(copy, s, n);
+    copy[n] = '\0';
+    free(t->uri_table.uris[slot]);
+    t->uri_table.uris[slot] = copy;
+    t->uri_table.next = (uint16_t)((t->uri_table.next + 1) % SP_URI_CAP);
+    if (t->uri_table.count < SP_URI_CAP) t->uri_table.count++;
+    return (uint16_t)(slot + 1);
+}
+
+const char* sp_terminal_uri_lookup(const sp_terminal* t, uint16_t id) {
+    if (!t || id == 0 || id > SP_URI_CAP) return NULL;
+    return t->uri_table.uris[id - 1];
+}
+
+/* Public hit-test. Row/col are viewport coordinates; scroll_offset is
+ * applied here so a hit on row 0 while scrolled up reports from the
+ * scrolled-in historical line (which currently has no URI tags → NULL). */
+const char* sp_terminal_hit_test_uri(const sp_terminal* t, int32_t row, int32_t col) {
+    if (!t) return NULL;
+    size_t off = sp_buffer_scroll_offset(t->buf);
+    if ((size_t)row < off) {
+        /* Historical row: scrollback doesn't carry URIs in v1. */
+        return NULL;
+    }
+    int32_t active_row = row - (int32_t)off;
+    uint16_t id = sp_buffer_get_uri(t->buf, active_row, col);
+    return sp_terminal_uri_lookup(t, id);
+}
+
+void sp_terminal_set_mouse_mode(sp_terminal* t, int mode, bool set) {
+    if (!t) return;
+    switch (mode) {
+        case 9:    t->mouse.x10          = set; break;
+        case 1000: t->mouse.button_event = set; break;
+        case 1002: t->mouse.button_motion = set; break;
+        case 1003: t->mouse.any_motion   = set; break;
+        case 1006: t->mouse.encode_sgr   = set; break;
+        case 1015: t->mouse.encode_urxvt = set; break;
+        default: break;
+    }
+    if (!set) {
+        /* Any disable wipes remembered state so a later enable starts fresh. */
+        t->mouse.last_button = -1;
+    }
+}
+
+int sp_terminal_mouse_mode(const sp_terminal* t) {
+    if (!t) return 0;
+    int bits = 0;
+    if (t->mouse.x10)           bits |= 1 << 0;
+    if (t->mouse.button_event)  bits |= 1 << 1;
+    if (t->mouse.button_motion) bits |= 1 << 2;
+    if (t->mouse.any_motion)    bits |= 1 << 3;
+    if (t->mouse.encode_sgr)    bits |= 1 << 4;
+    if (t->mouse.encode_urxvt)  bits |= 1 << 5;
+    return bits;
 }
 
 /* ---- Paste (bracketed if DECSET 2004 set) ----------------------------- */

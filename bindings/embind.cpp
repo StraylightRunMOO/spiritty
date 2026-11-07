@@ -38,6 +38,14 @@ using emscripten::value_object;
 using emscripten::function;
 using emscripten::register_vector;
 
+/* Bridge the C-side sp_event_cb back into a JS callback stashed on the
+ * handle. The handle's `event_cb_` holds an emscripten::val; on each C
+ * event we marshal it into a plain object and invoke the val. */
+struct SpEventBridge {
+    emscripten::val cb;
+    SpEventBridge() : cb(emscripten::val::undefined()) {}
+};
+
 namespace {
 
 /* RAII handle that owns a terminal + its WebGL renderer. JS keeps a
@@ -108,6 +116,7 @@ public:
         /* Detach before destroying renderer so the terminal's pointer
          * is cleared before we free the renderer's storage. */
         if (term_) {
+            sp_terminal_set_event_cb(term_, nullptr, nullptr);
             sp_terminal_attach_renderer(term_, nullptr);
         }
         if (renderer_) {
@@ -121,6 +130,71 @@ public:
     }
 
     bool valid() const { return term_ != nullptr; }
+
+    /* ---- Event subscription ---- */
+
+    /* `cb` is called with a single JS object:
+     *    { kind: "data" | "resize" | "title" | "bell" | "cursor" | "scroll" | "selection",
+     *      ...per-kind fields }
+     * data/bytes is a Uint8Array copy; title.text is a string. */
+    void setEventCb(val cb) {
+        bridge_.cb = cb;
+        if (!term_) return;
+        if (cb.isUndefined() || cb.isNull()) {
+            sp_terminal_set_event_cb(term_, nullptr, nullptr);
+        } else {
+            sp_terminal_set_event_cb(term_, &SpTerminalHandle::event_trampoline, this);
+        }
+    }
+
+private:
+    static void event_trampoline(const sp_event* ev, void* user) {
+        auto* self = static_cast<SpTerminalHandle*>(user);
+        if (!self || self->bridge_.cb.isUndefined() || self->bridge_.cb.isNull()) return;
+        val out = val::object();
+        switch (ev->kind) {
+            case SP_EV_DATA: {
+                val arr = val(emscripten::typed_memory_view(ev->as.data.len,
+                                                            ev->as.data.bytes));
+                /* Copy into a fresh Uint8Array so the caller can keep it. */
+                val u8 = val::global("Uint8Array").new_(arr);
+                out.set("kind",  std::string("data"));
+                out.set("bytes", u8);
+                break;
+            }
+            case SP_EV_RESIZE:
+                out.set("kind", std::string("resize"));
+                out.set("cols", ev->as.resize.cols);
+                out.set("rows", ev->as.resize.rows);
+                break;
+            case SP_EV_TITLE:
+                out.set("kind", std::string("title"));
+                out.set("text", std::string(ev->as.title.text ? ev->as.title.text : ""));
+                break;
+            case SP_EV_BELL:
+                out.set("kind", std::string("bell"));
+                break;
+            case SP_EV_CURSOR:
+                out.set("kind",    std::string("cursor"));
+                out.set("row",     ev->as.cursor.row);
+                out.set("col",     ev->as.cursor.col);
+                out.set("visible", ev->as.cursor.visible);
+                break;
+            case SP_EV_SCROLL:
+                out.set("kind", std::string("scroll"));
+                out.set("top",  ev->as.scroll.top);
+                break;
+            case SP_EV_SELECTION:
+                out.set("kind", std::string("selection"));
+                break;
+            default:
+                out.set("kind", std::string("unknown"));
+                break;
+        }
+        self->bridge_.cb(out);
+    }
+
+public:
 
     /* ---- I/O & state ---- */
 
@@ -213,8 +287,21 @@ public:
         if (term_) sp_terminal_send_mouse(term_, row, col, button, pressed);
     }
 
+    int32_t mouseMode() const {
+        return term_ ? sp_terminal_mouse_mode(term_) : 0;
+    }
+
     void sendPaste(const std::string& utf8) {
         if (term_) sp_terminal_send_paste(term_, utf8.data(), utf8.size());
+    }
+
+    /* OSC 8 hit-test. Returns the URI at the given viewport cell or an
+     * empty string if nothing is there. Caller-side wrapper compares
+     * against "" (falsy) instead of needing a nullable binding. */
+    std::string uriAt(int32_t row, int32_t col) const {
+        if (!term_) return {};
+        const char* s = sp_terminal_hit_test_uri(term_, row, col);
+        return s ? std::string(s) : std::string();
     }
 
     /* ---- Scrollback viewport ---- */
@@ -319,6 +406,7 @@ private:
     float        cell_w_  = 0.0f;
     float        cell_h_  = 0.0f;
     float        font_px_ = 0.0f;
+    SpEventBridge bridge_;
 };
 
 /* sp_options has a NULL-defaulted const char* font_family and a
@@ -405,7 +493,10 @@ EMSCRIPTEN_BINDINGS(spiritty) {
         .function("selectionText",  &SpTerminalHandle::selectionText)
         .function("sendKey",        &SpTerminalHandle::sendKey)
         .function("sendMouse",      &SpTerminalHandle::sendMouse)
+        .function("mouseMode",      &SpTerminalHandle::mouseMode)
         .function("sendPaste",      &SpTerminalHandle::sendPaste)
+        .function("uriAt",          &SpTerminalHandle::uriAt)
+        .function("setEventCb",     &SpTerminalHandle::setEventCb)
         .function("scrollOffset",   &SpTerminalHandle::scrollOffset)
         .function("scrollMax",      &SpTerminalHandle::scrollMax)
         .function("scrollTo",       &SpTerminalHandle::scrollTo)

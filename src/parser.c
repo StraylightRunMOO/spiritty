@@ -160,6 +160,11 @@ static void sp_handle_print_cp(sp_parser* p, uint32_t cp) {
     struct sp_terminal* t = p->owner;
     if (!t || !t->buf) return;
     sp_buffer_write_cp(t->buf, t->cursor.row, t->cursor.col, cp, p->gr);
+    /* Tag the cell we just wrote with the current OSC 8 URI (if any).
+     * Written before the cursor advance so the coordinates are right. */
+    if (t->current_uri_id != 0) {
+        sp_buffer_set_uri(t->buf, t->cursor.row, t->cursor.col, t->current_uri_id);
+    }
     sp_cursor_advance(t);
 }
 
@@ -459,6 +464,14 @@ static void sp_csi_dispatch(sp_parser* p, uint8_t final_byte) {
                                    t->cursor.visible = set; break;
                         case 6:    t->origin_mode   = set; break;
                         case 2004: t->bracketed_paste = set; break;
+                        case 9:
+                        case 1000:
+                        case 1002:
+                        case 1003:
+                        case 1006:
+                        case 1015:
+                            sp_terminal_set_mouse_mode(t, v, set);
+                            break;
                         default:   break;
                     }
                 } else {
@@ -682,6 +695,34 @@ static void sp_osc_dispatch(sp_parser* p) {
                     sp_terminal_set_palette_entry(t, idx, v);
             }
             if (pos < body_len && body[pos] == ';') pos++;
+        }
+        break;
+    }
+    case 8: {
+        /* OSC 8 ; params ; URI  — begin hyperlink (empty URI closes it).
+         * `params` is semicolon-less (comma-separated key=value pairs); we
+         * don't surface those to the host yet, just skip past. */
+        size_t pos = 0;
+        /* Skip params up to the next ';'. */
+        while (pos < body_len && body[pos] != ';') pos++;
+        if (pos < body_len) pos++;  /* step over the ';' */
+        const char* uri = body + pos;
+        size_t ulen = body_len - pos;
+        /* Trim trailing whitespace (xterm tolerates \r / spaces). */
+        while (ulen > 0 && (uri[ulen - 1] == ' ' || uri[ulen - 1] == '\r' ||
+                            uri[ulen - 1] == '\n' || uri[ulen - 1] == '\t'))
+            ulen--;
+        /* Reject control chars anywhere in the URI — defends against
+         * injected ESC inside the hyperlink payload (xterm does the same). */
+        bool safe = true;
+        for (size_t k = 0; k < ulen; k++) {
+            unsigned char ch = (unsigned char)uri[k];
+            if (ch < 0x20 || ch == 0x7F) { safe = false; break; }
+        }
+        if (!safe || ulen == 0) {
+            t->current_uri_id = 0;      /* close any active link */
+        } else {
+            t->current_uri_id = sp_terminal_uri_intern(t, uri, ulen);
         }
         break;
     }

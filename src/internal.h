@@ -112,6 +112,14 @@ void   sp_buffer_scroll_to    (sp_buffer* b, size_t offset);
 void   sp_buffer_scroll_by    (sp_buffer* b, int64_t delta);
 void   sp_buffer_scroll_reset (sp_buffer* b);
 
+/* Per-cell URI intern id (0 = no URI). Parallel grid co-resized with the
+ * active screen; cleared on buffer_clear / clear_line / clear_range; shifted
+ * alongside cells on scroll_up / scroll_down. Scrollback does not carry
+ * URIs (deliberate v1 simplification). */
+void     sp_buffer_set_uri    (sp_buffer* b, int32_t row, int32_t col, uint16_t id);
+uint16_t sp_buffer_get_uri    (const sp_buffer* b, int32_t row, int32_t col);
+void     sp_buffer_clear_uris (sp_buffer* b);
+
 /* Mark all visible rows dirty. */
 void sp_buffer_mark_all_dirty(sp_buffer* b);
 void sp_buffer_clear_dirty   (sp_buffer* b);
@@ -143,6 +151,28 @@ const sp_selection* sp_selmgr_selection(const sp_selmgr* sm);
 
 /* ---- Terminal internals (visible to parser/selmgr) -------------------- */
 
+/* Mouse-reporting mode flags; each flipped by DECSET/DECRST private 1000
+ * family. `encode_sgr` wins over `encode_urxvt` wins over the X10 fallback. */
+typedef struct {
+    bool x10;               /* DECSET 9  — press-only legacy X10 */
+    bool button_event;      /* DECSET 1000 — press + release */
+    bool button_motion;     /* DECSET 1002 — press/release + motion while held */
+    bool any_motion;        /* DECSET 1003 — press/release + any motion */
+    bool encode_sgr;        /* DECSET 1006 — CSI < Cb;Cx;Cy M/m */
+    bool encode_urxvt;      /* DECSET 1015 — CSI Cb;Cx;Cy M */
+    int32_t last_button;    /* last pressed button, for motion fill-in */
+    int32_t last_row, last_col;
+} sp_mouse_state;
+
+/* Small interned URI table for OSC 8 hyperlinks. Cap keeps a long session
+ * from unbounded growth; when full new URIs reuse the oldest slot (ring). */
+#define SP_URI_CAP 256
+typedef struct {
+    char*   uris[SP_URI_CAP];  /* malloc'd NUL-terminated; NULL when empty */
+    uint16_t count;             /* total unique uris ever interned (saturates) */
+    uint16_t next;              /* next slot index for LRU replacement */
+} sp_uri_table;
+
 struct sp_terminal {
     sp_options    opts;
     sp_renderer*  renderer;
@@ -170,6 +200,15 @@ struct sp_terminal {
 
     char          window_title[256];
 
+    /* Mouse reporting mode + last-reported state. */
+    sp_mouse_state mouse;
+
+    /* OSC 8 hyperlinks. The parser pushes/pops the current URI id via
+     * `current_uri_id`; the print path reads it and tags each cell it
+     * writes into sp_buffer_set_uri. */
+    sp_uri_table   uri_table;
+    uint16_t       current_uri_id;    /* 0 = no active link */
+
     /* Render scratch — flattened active screen rebuilt each render call. */
     sp_cell*      render_scratch;
     size_t        render_scratch_capacity;
@@ -178,6 +217,15 @@ struct sp_terminal {
      * via sp_terminal_set_time(). Forwarded to the renderer for iTime. */
     float         time_seconds;
 };
+
+/* Intern a URI string. Returns an opaque id > 0 on success, or 0 if the
+ * string is empty/NULL. Duplicate lookups return the existing id. */
+uint16_t    sp_terminal_uri_intern(struct sp_terminal* t, const char* s, size_t n);
+const char* sp_terminal_uri_lookup(const struct sp_terminal* t, uint16_t id);
+
+/* Mouse-reporting mode toggles. Flipped by DECSET/DECRST in parser.c; also
+ * exposed publicly via sp_terminal_mouse_mode() for host introspection. */
+void sp_terminal_set_mouse_mode(struct sp_terminal* t, int mode, bool set);
 
 /* Clamp helper used by parser/selmgr/terminal. */
 static inline int32_t sp_clamp_i32(int32_t v, int32_t lo, int32_t hi) {
