@@ -212,6 +212,37 @@ SPIRITTY_API void sp_terminal_send_mouse(sp_terminal* t,
                                          int32_t row, int32_t col,
                                          int32_t button, bool pressed);
 
+/* ---- Paste (bracketed if DECSET 2004 enabled) ------------------------- */
+
+SPIRITTY_API void sp_terminal_send_paste(sp_terminal* t,
+                                         const char* utf8, size_t len);
+
+/* ---- Scrollback viewport ---------------------------------------------- */
+
+SPIRITTY_API size_t sp_terminal_scroll_offset(const sp_terminal* t);
+SPIRITTY_API size_t sp_terminal_scroll_max   (const sp_terminal* t);
+SPIRITTY_API void   sp_terminal_scroll_to    (sp_terminal* t, size_t offset);
+SPIRITTY_API void   sp_terminal_scroll_by    (sp_terminal* t, int64_t delta);
+SPIRITTY_API void   sp_terminal_scroll_reset (sp_terminal* t);
+
+/* ---- Palette & color -------------------------------------------------- */
+
+enum {
+    SP_COLOR_FG        = 0,
+    SP_COLOR_BG        = 1,
+    SP_COLOR_CURSOR    = 2,
+    SP_COLOR_SELECTION = 3
+};
+
+SPIRITTY_API void     sp_terminal_set_palette_entry(sp_terminal* t,
+                                                    int idx, uint32_t rgba);
+SPIRITTY_API uint32_t sp_terminal_get_palette_entry(const sp_terminal* t, int idx);
+SPIRITTY_API void     sp_terminal_reset_palette_entry(sp_terminal* t, int idx);
+SPIRITTY_API void     sp_terminal_set_color      (sp_terminal* t,
+                                                  int role, uint32_t rgba);
+SPIRITTY_API uint32_t sp_terminal_get_color      (const sp_terminal* t, int role);
+SPIRITTY_API void     sp_terminal_reset_color    (sp_terminal* t, int role);
+
 /* ---- Shader hot-swap (forwards to attached renderer) ------------------ */
 
 SPIRITTY_API bool sp_terminal_set_custom_shader(sp_terminal* t,

@@ -325,6 +325,11 @@ struct sp_buffer {
     sp_line*      visible;        /* rows-long array of lines */
     sp_scrollback sb;
     sp_line_pool  pool;
+    /* Viewport offset in lines ABOVE the live bottom. 0 = pinned to bottom
+     * (the normal render path); scroll_offset ≤ sb.size caps at the top of
+     * scrollback. Set by the host for wheel / PgUp; reset to 0 on any
+     * write (xterm "snap to bottom on output"). */
+    size_t        scroll_offset;
 };
 
 sp_buffer* sp_buffer_create(int32_t rows, int32_t cols, int32_t sb_max) {
@@ -571,6 +576,31 @@ size_t sp_buffer_scrollback_max(const sp_buffer* b) {
 const sp_line* sp_buffer_scrollback_at(const sp_buffer* b, size_t idx) {
     if (!b) return NULL;
     return sb_at(&b->sb, idx);
+}
+
+size_t sp_buffer_scroll_offset(const sp_buffer* b) {
+    return b ? b->scroll_offset : 0;
+}
+size_t sp_buffer_scroll_max(const sp_buffer* b) {
+    return b ? b->sb.size : 0;
+}
+void sp_buffer_scroll_to(sp_buffer* b, size_t offset) {
+    if (!b) return;
+    if (offset > b->sb.size) offset = b->sb.size;
+    if (b->scroll_offset != offset) {
+        b->scroll_offset = offset;
+        sp_buffer_mark_all_dirty(b);
+    }
+}
+void sp_buffer_scroll_by(sp_buffer* b, int64_t delta) {
+    if (!b) return;
+    int64_t cur = (int64_t)b->scroll_offset + delta;
+    if (cur < 0) cur = 0;
+    if ((uint64_t)cur > (uint64_t)b->sb.size) cur = (int64_t)b->sb.size;
+    sp_buffer_scroll_to(b, (size_t)cur);
+}
+void sp_buffer_scroll_reset(sp_buffer* b) {
+    sp_buffer_scroll_to(b, 0);
 }
 
 void sp_buffer_mark_all_dirty(sp_buffer* b) {

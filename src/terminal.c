@@ -48,6 +48,44 @@ static sp_cell_attrs sp_default_attrs_from_opts(const sp_options* o) {
     return a;
 }
 
+/* xterm/ANSI 256-color palette, same math as parser.c's old static table.
+ * Populated once at create, then mutated via OSC 4 / sp_terminal_set_palette_*. */
+static uint32_t sp_palette_default_entry(int idx) {
+    static const uint32_t base16[16] = {
+        0x000000FFu, 0xCD0000FFu, 0x00CD00FFu, 0xCDCD00FFu,
+        0x0000EEFFu, 0xCD00CDFFu, 0x00CDCDFFu, 0xE5E5E5FFu,
+        0x7F7F7FFFu, 0xFF0000FFu, 0x00FF00FFu, 0xFFFF00FFu,
+        0x5C5CFFFFu, 0xFF00FFFFu, 0x00FFFFFFu, 0xFFFFFFFFu,
+    };
+    if (idx < 0 || idx > 255) return 0xFFFFFFFFu;
+    if (idx < 16) return base16[idx];
+    if (idx < 232) {
+        int i = idx - 16;
+        int r = (i / 36) % 6;
+        int g = (i / 6)  % 6;
+        int b =  i       % 6;
+        uint32_t rv = r ? (uint32_t)(55 + 40 * r) : 0u;
+        uint32_t gv = g ? (uint32_t)(55 + 40 * g) : 0u;
+        uint32_t bv = b ? (uint32_t)(55 + 40 * b) : 0u;
+        return (rv << 24) | (gv << 16) | (bv << 8) | 0xFFu;
+    }
+    uint32_t v = (uint32_t)(8 + 10 * (idx - 232));
+    return (v << 24) | (v << 16) | (v << 8) | 0xFFu;
+}
+
+static void sp_palette_reset(sp_terminal* t) {
+    for (int i = 0; i < 256; i++) t->palette[i] = sp_palette_default_entry(i);
+    if (t->opts.palette && t->opts.palette_len > 0) {
+        size_t n = t->opts.palette_len > 256 ? 256 : t->opts.palette_len;
+        for (size_t i = 0; i < n; i++) t->palette[i] = t->opts.palette[i];
+    }
+}
+
+uint32_t sp_terminal_palette_entry(const sp_terminal* t, int idx) {
+    if (!t || idx < 0 || idx > 255) return 0xFFFFFFFFu;
+    return t->palette[idx];
+}
+
 /* ---- Lifecycle --------------------------------------------------------- */
 
 sp_terminal* sp_terminal_create(const sp_options* opts) {
@@ -73,6 +111,8 @@ sp_terminal* sp_terminal_create(const sp_options* opts) {
     t->auto_wrap = true;
     t->origin_mode = false;
     t->cursor_visible = true;
+    t->bracketed_paste = false;
+    sp_palette_reset(t);
 
     t->buf = sp_buffer_create(t->opts.rows, t->opts.cols, t->opts.scrollback_lines);
     if (!t->buf) { free(t); return NULL; }
@@ -112,6 +152,9 @@ void sp_terminal_set_event_cb(sp_terminal* t, sp_event_cb cb, void* user) {
 void sp_terminal_write(sp_terminal* SPIRITTY_RESTRICT t,
                        const uint8_t* SPIRITTY_RESTRICT data, size_t len) {
     if (!t || !data || len == 0) return;
+    /* xterm convention: any new output snaps the viewport to the bottom.
+     * Host can scroll back up with sp_terminal_scroll_* after this returns. */
+    if (t->buf) sp_buffer_scroll_reset(t->buf);
     sp_parser_feed(t->parser, data, len);
 }
 
@@ -152,10 +195,11 @@ void sp_terminal_reset(sp_terminal* t) {
     t->default_attrs = sp_default_attrs_from_opts(&t->opts);
 }
 
-/* Flatten the active screen into t->render_scratch in row-major order.
- * Returns the cell count (cols * rows) on success, 0 on allocation
- * failure. The returned pointer is owned by the terminal and stays
- * valid until the next render call or destroy. */
+/* Flatten the viewport (active screen, optionally offset into scrollback)
+ * into t->render_scratch in row-major order. When sp_buffer_scroll_offset
+ * is 0, this is the active screen as-is; when it's N > 0, the top rows of
+ * the viewport come from the scrollback ring. Returns the cell count
+ * (cols * rows) on success, 0 on allocation failure. */
 static size_t sp_terminal_flatten_active(sp_terminal* t) {
     int32_t cols = sp_buffer_cols(t->buf);
     int32_t rows = sp_buffer_rows(t->buf);
@@ -168,9 +212,25 @@ static size_t sp_terminal_flatten_active(sp_terminal* t) {
         t->render_scratch          = p;
         t->render_scratch_capacity = needed;
     }
+
+    size_t offset = sp_buffer_scroll_offset(t->buf);
+    size_t sb_size = sp_buffer_scrollback_size(t->buf);
+    if (offset > sb_size) offset = sb_size;
+
     for (int32_t r = 0; r < rows; ++r) {
-        const sp_line* ln = sp_buffer_line_const(t->buf, r);
         sp_cell* dst = t->render_scratch + (size_t)r * (size_t)cols;
+        const sp_line* ln = NULL;
+        if ((size_t)r < offset) {
+            /* Pull from scrollback: viewport row r shows sb entry
+             * (sb_size - offset) + r, which is `offset - r` entries
+             * before the live bottom. */
+            size_t idx = sb_size - offset + (size_t)r;
+            ln = sp_buffer_scrollback_at(t->buf, idx);
+        } else {
+            /* Pull from active screen, shifted up by offset. */
+            int32_t vrow = r - (int32_t)offset;
+            ln = sp_buffer_line_const(t->buf, vrow);
+        }
         if (ln && ln->cells && ln->cols >= cols) {
             memcpy(dst, ln->cells, (size_t)cols * sizeof(sp_cell));
         } else if (ln && ln->cells && ln->cols > 0) {
@@ -191,14 +251,22 @@ void sp_terminal_render(sp_terminal* t) {
 
     if (v->draw_cells) {
         size_t n = sp_terminal_flatten_active(t);
+        /* When scrolled up, the cursor logically belongs at the bottom of
+         * the active screen; translate it into viewport coords. If that
+         * pushes it off the bottom of the viewport, hide it (xterm does
+         * the same — no cursor is drawn while viewing history). */
+        size_t offset = sp_buffer_scroll_offset(t->buf);
+        int32_t cur_row = t->cursor.row + (int32_t)offset;
+        bool cur_visible = t->cursor_visible && t->cursor.visible;
+        if (cur_row >= sp_buffer_rows(t->buf)) cur_visible = false;
         sp_cell_batch batch = {
             .cells          = t->render_scratch,
             .cell_count     = n,
             .cols           = sp_buffer_cols(t->buf),
             .rows           = sp_buffer_rows(t->buf),
-            .cursor_row     = t->cursor.row,
+            .cursor_row     = cur_row,
             .cursor_col     = t->cursor.col,
-            .cursor_visible = t->cursor_visible && t->cursor.visible,
+            .cursor_visible = cur_visible,
             .time_seconds   = t->time_seconds,
         };
         v->draw_cells(t->renderer->self, &batch);
@@ -283,6 +351,116 @@ void sp_terminal_send_mouse(sp_terminal* t, int32_t row, int32_t col,
     (void)t; (void)row; (void)col; (void)button; (void)pressed;
     /* Mouse-reporting (X10/SGR) lives behind DECSET 1000/1006; we'll wire
      * the encoder up when those modes flip on. For now: drop. */
+}
+
+/* ---- Paste (bracketed if DECSET 2004 set) ----------------------------- */
+
+void sp_terminal_send_paste(sp_terminal* t, const char* utf8, size_t len) {
+    if (!t || !utf8 || len == 0) return;
+    /* Strip embedded ESC from the paste body to avoid injected sequences
+     * running when bracketed paste isn't active — xterm does this
+     * unconditionally. Build the payload into a transient buffer. */
+    size_t cap = len + 16; /* room for 200~/201~ wrap */
+    char* buf = (char*)malloc(cap);
+    if (!buf) return;
+    size_t off = 0;
+    if (t->bracketed_paste) {
+        static const char lead[] = "\x1b[200~";
+        memcpy(buf + off, lead, 6); off += 6;
+    }
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char b = (unsigned char)utf8[i];
+        if (b == 0x1B) continue;    /* drop ESC */
+        buf[off++] = (char)b;
+    }
+    if (t->bracketed_paste) {
+        static const char trail[] = "\x1b[201~";
+        memcpy(buf + off, trail, 6); off += 6;
+    }
+    sp_event ev = {
+        .kind = SP_EV_DATA,
+        .as.data.bytes = (const uint8_t*)buf,
+        .as.data.len   = off,
+    };
+    sp_terminal_emit(t, &ev);
+    free(buf);
+}
+
+/* ---- Scrollback viewport ----------------------------------------------- */
+
+size_t sp_terminal_scroll_offset(const sp_terminal* t) {
+    return t ? sp_buffer_scroll_offset(t->buf) : 0;
+}
+size_t sp_terminal_scroll_max(const sp_terminal* t) {
+    return t ? sp_buffer_scroll_max(t->buf) : 0;
+}
+void sp_terminal_scroll_to(sp_terminal* t, size_t offset) {
+    if (t) sp_buffer_scroll_to(t->buf, offset);
+}
+void sp_terminal_scroll_by(sp_terminal* t, int64_t delta) {
+    if (t) sp_buffer_scroll_by(t->buf, delta);
+}
+void sp_terminal_scroll_reset(sp_terminal* t) {
+    if (t) sp_buffer_scroll_reset(t->buf);
+}
+
+/* ---- Palette & color ------------------------------------------------- */
+
+void sp_terminal_set_palette_entry(sp_terminal* t, int idx, uint32_t rgba) {
+    if (!t || idx < 0 || idx > 255) return;
+    t->palette[idx] = rgba;
+    sp_buffer_mark_all_dirty(t->buf);
+}
+
+uint32_t sp_terminal_get_palette_entry(const sp_terminal* t, int idx) {
+    return sp_terminal_palette_entry(t, idx);
+}
+
+void sp_terminal_reset_palette_entry(sp_terminal* t, int idx) {
+    if (!t || idx < 0 || idx > 255) return;
+    t->palette[idx] = sp_palette_default_entry(idx);
+    sp_buffer_mark_all_dirty(t->buf);
+}
+
+void sp_terminal_set_color(sp_terminal* t, int role, uint32_t rgba) {
+    if (!t) return;
+    switch (role) {
+        case SP_COLOR_FG:        t->opts.color_fg       = rgba; break;
+        case SP_COLOR_BG:        t->opts.color_bg       = rgba; break;
+        case SP_COLOR_CURSOR:    t->opts.color_cursor   = rgba; break;
+        case SP_COLOR_SELECTION: t->opts.color_selection = rgba; break;
+        default: return;
+    }
+    /* Also refresh the default rendition the parser is emitting so new
+     * writes pick up the new fg/bg immediately. */
+    t->default_attrs = sp_default_attrs_from_opts(&t->opts);
+    sp_buffer_mark_all_dirty(t->buf);
+}
+
+uint32_t sp_terminal_get_color(const sp_terminal* t, int role) {
+    if (!t) return 0;
+    switch (role) {
+        case SP_COLOR_FG:        return t->opts.color_fg;
+        case SP_COLOR_BG:        return t->opts.color_bg;
+        case SP_COLOR_CURSOR:    return t->opts.color_cursor;
+        case SP_COLOR_SELECTION: return t->opts.color_selection;
+    }
+    return 0;
+}
+
+void sp_terminal_reset_color(sp_terminal* t, int role) {
+    /* Without a remembered original we just revert to the hard defaults —
+     * the same values sp_options_default sets. Matches OSC 110/111/112
+     * semantics closely enough for v1. */
+    uint32_t v = 0;
+    switch (role) {
+        case SP_COLOR_FG:        v = 0xFFFFFFFFu; break;
+        case SP_COLOR_BG:        v = 0x000000FFu; break;
+        case SP_COLOR_CURSOR:    v = 0xFFFFFFFFu; break;
+        case SP_COLOR_SELECTION: v = 0x80808080u; break;
+        default: return;
+    }
+    sp_terminal_set_color(t, role, v);
 }
 
 bool sp_terminal_set_custom_shader(sp_terminal* t, const char* glsl_source) {

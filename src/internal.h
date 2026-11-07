@@ -102,6 +102,16 @@ size_t sp_buffer_scrollback_size(const sp_buffer* b);
 size_t sp_buffer_scrollback_max (const sp_buffer* b);
 const sp_line* sp_buffer_scrollback_at(const sp_buffer* b, size_t idx);
 
+/* Scrollback viewport: `scroll_offset` is lines above the live bottom.
+ * 0 = pinned to bottom (normal); scrollback_size = fully scrolled up. The
+ * renderer reads scroll_offset via sp_buffer_scroll_offset and flattens
+ * historical lines in for any scrolled-up portion of the viewport. */
+size_t sp_buffer_scroll_offset(const sp_buffer* b);
+size_t sp_buffer_scroll_max   (const sp_buffer* b);
+void   sp_buffer_scroll_to    (sp_buffer* b, size_t offset);
+void   sp_buffer_scroll_by    (sp_buffer* b, int64_t delta);
+void   sp_buffer_scroll_reset (sp_buffer* b);
+
 /* Mark all visible rows dirty. */
 void sp_buffer_mark_all_dirty(sp_buffer* b);
 void sp_buffer_clear_dirty   (sp_buffer* b);
@@ -151,6 +161,12 @@ struct sp_terminal {
     bool          auto_wrap;
     bool          origin_mode;
     bool          cursor_visible;
+    bool          bracketed_paste;   /* DECSET 2004 — wrap pastes in ESC[200~/201~ */
+
+    /* Live 256-entry palette (ANSI 0-15, xterm 6×6×6 cube, 24 greys). OSC 4
+     * mutates entries; OSC 104 resets. SGR 30-37/40-47/90-97/100-107 and
+     * 38;5;N / 48;5;N look up through here. */
+    uint32_t      palette[256];
 
     char          window_title[256];
 
@@ -171,6 +187,9 @@ static inline int32_t sp_clamp_i32(int32_t v, int32_t lo, int32_t hi) {
 static inline void sp_terminal_emit(struct sp_terminal* t, const sp_event* ev) {
     if (t && t->event_cb) t->event_cb(ev, t->event_user);
 }
+
+/* Palette lookup used by the parser's SGR dispatch. idx 0-255. */
+uint32_t sp_terminal_palette_entry(const sp_terminal* t, int idx);
 
 #ifdef __cplusplus
 }

@@ -213,6 +213,66 @@ public:
         if (term_) sp_terminal_send_mouse(term_, row, col, button, pressed);
     }
 
+    void sendPaste(const std::string& utf8) {
+        if (term_) sp_terminal_send_paste(term_, utf8.data(), utf8.size());
+    }
+
+    /* ---- Scrollback viewport ---- */
+
+    uint32_t scrollOffset() const {
+        return term_ ? static_cast<uint32_t>(sp_terminal_scroll_offset(term_)) : 0u;
+    }
+    uint32_t scrollMax() const {
+        return term_ ? static_cast<uint32_t>(sp_terminal_scroll_max(term_)) : 0u;
+    }
+    void scrollTo(uint32_t offset) {
+        if (term_) sp_terminal_scroll_to(term_, offset);
+    }
+    void scrollLines(int32_t delta) {
+        if (term_) sp_terminal_scroll_by(term_, delta);
+    }
+    void scrollHome() {
+        if (term_) sp_terminal_scroll_to(term_, sp_terminal_scroll_max(term_));
+    }
+    void scrollEnd() {
+        if (term_) sp_terminal_scroll_reset(term_);
+    }
+    val scrollInfo() const {
+        val out = val::object();
+        out.set("offset", scrollOffset());
+        out.set("max",    scrollMax());
+        return out;
+    }
+
+    /* ---- Palette & color ---- */
+
+    void setPaletteEntry(int32_t idx, uint32_t rgba) {
+        if (term_) sp_terminal_set_palette_entry(term_, idx, rgba);
+    }
+    uint32_t getPaletteEntry(int32_t idx) const {
+        return term_ ? sp_terminal_get_palette_entry(term_, idx) : 0u;
+    }
+    void setColor(int32_t role, uint32_t rgba) {
+        if (term_) sp_terminal_set_color(term_, role, rgba);
+    }
+    uint32_t getColor(int32_t role) const {
+        return term_ ? sp_terminal_get_color(term_, role) : 0u;
+    }
+    void setPalette(val arr) {
+        if (!term_) return;
+        const auto v = emscripten::convertJSArrayToNumberVector<uint32_t>(arr);
+        size_t n = v.size() > 256 ? 256 : v.size();
+        for (size_t i = 0; i < n; ++i)
+            sp_terminal_set_palette_entry(term_, static_cast<int>(i), v[i]);
+    }
+    val getPalette() const {
+        val arr = val::array();
+        if (!term_) return arr;
+        for (int i = 0; i < 256; ++i)
+            arr.call<void>("push", sp_terminal_get_palette_entry(term_, i));
+        return arr;
+    }
+
     /* ---- Shader hot-swap ---- */
 
     bool setCustomShader(const std::string& glsl) {
@@ -345,6 +405,20 @@ EMSCRIPTEN_BINDINGS(spiritty) {
         .function("selectionText",  &SpTerminalHandle::selectionText)
         .function("sendKey",        &SpTerminalHandle::sendKey)
         .function("sendMouse",      &SpTerminalHandle::sendMouse)
+        .function("sendPaste",      &SpTerminalHandle::sendPaste)
+        .function("scrollOffset",   &SpTerminalHandle::scrollOffset)
+        .function("scrollMax",      &SpTerminalHandle::scrollMax)
+        .function("scrollTo",       &SpTerminalHandle::scrollTo)
+        .function("scrollLines",    &SpTerminalHandle::scrollLines)
+        .function("scrollHome",     &SpTerminalHandle::scrollHome)
+        .function("scrollEnd",      &SpTerminalHandle::scrollEnd)
+        .function("scrollInfo",     &SpTerminalHandle::scrollInfo)
+        .function("setPaletteEntry",&SpTerminalHandle::setPaletteEntry)
+        .function("getPaletteEntry",&SpTerminalHandle::getPaletteEntry)
+        .function("setColor",       &SpTerminalHandle::setColor)
+        .function("getColor",       &SpTerminalHandle::getColor)
+        .function("setPalette",     &SpTerminalHandle::setPalette)
+        .function("getPalette",     &SpTerminalHandle::getPalette)
         .function("setCustomShader",&SpTerminalHandle::setCustomShader)
         .function("cellWidth",      &SpTerminalHandle::cellWidth)
         .function("cellHeight",     &SpTerminalHandle::cellHeight)

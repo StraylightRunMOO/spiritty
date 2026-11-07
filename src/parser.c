@@ -25,31 +25,8 @@
 #define SP_OSC_BUF_MAX      4096
 #define SP_INTERMEDIATE_MAX 4
 
-/* xterm/ANSI 256-color palette (compressed from the legacy init_color_palette).
- * Index 0..15 = system colors, 16..231 = 6×6×6 cube, 232..255 = grayscale. */
-static uint32_t sp_palette_default(int idx) {
-    static const uint32_t base16[16] = {
-        0x000000FFu, 0xCD0000FFu, 0x00CD00FFu, 0xCDCD00FFu,
-        0x0000EEFFu, 0xCD00CDFFu, 0x00CDCDFFu, 0xE5E5E5FFu,
-        0x7F7F7FFFu, 0xFF0000FFu, 0x00FF00FFu, 0xFFFF00FFu,
-        0x5C5CFFFFu, 0xFF00FFFFu, 0x00FFFFFFu, 0xFFFFFFFFu,
-    };
-    if (idx < 0 || idx > 255) return 0xFFFFFFFFu;
-    if (idx < 16) return base16[idx];
-    if (idx < 232) {
-        int i = idx - 16;
-        int r = (i / 36) % 6;
-        int g = (i / 6)  % 6;
-        int b =  i       % 6;
-        uint32_t rv = r ? (uint32_t)(55 + 40 * r) : 0u;
-        uint32_t gv = g ? (uint32_t)(55 + 40 * g) : 0u;
-        uint32_t bv = b ? (uint32_t)(55 + 40 * b) : 0u;
-        return (rv << 24) | (gv << 16) | (bv << 8) | 0xFFu;
-    }
-    /* Grayscale */
-    uint32_t v = (uint32_t)(8 + 10 * (idx - 232));
-    return (v << 24) | (v << 16) | (v << 8) | 0xFFu;
-}
+/* The live 256-color palette lives on sp_terminal now so it can be
+ * mutated by OSC 4. Fetch via sp_terminal_palette_entry (internal.h). */
 
 /* ---- States ------------------------------------------------------------- */
 
@@ -313,11 +290,11 @@ static void sp_apply_sgr(sp_parser* p) {
         } else if (pv == 29) {
             p->gr.flags &= (uint16_t)~SP_ATTR_STRIKETHROUGH;
         } else if (pv >= 30 && pv <= 37) {
-            p->gr.fg = sp_palette_default(pv - 30);
+            p->gr.fg = sp_terminal_palette_entry(p->owner, pv - 30);
         } else if (pv == 38) {
             /* 38;5;N or 38;2;R;G;B */
             if (i + 2 < p->nparams && p->params[i + 1] == 5) {
-                p->gr.fg = sp_palette_default(p->params[i + 2]);
+                p->gr.fg = sp_terminal_palette_entry(p->owner, p->params[i + 2]);
                 i += 2;
             } else if (i + 4 < p->nparams && p->params[i + 1] == 2) {
                 uint32_t r = (uint32_t)(p->params[i + 2] & 0xFF);
@@ -329,10 +306,10 @@ static void sp_apply_sgr(sp_parser* p) {
         } else if (pv == 39) {
             p->gr.fg = p->owner->opts.color_fg;
         } else if (pv >= 40 && pv <= 47) {
-            p->gr.bg = sp_palette_default(pv - 40);
+            p->gr.bg = sp_terminal_palette_entry(p->owner, pv - 40);
         } else if (pv == 48) {
             if (i + 2 < p->nparams && p->params[i + 1] == 5) {
-                p->gr.bg = sp_palette_default(p->params[i + 2]);
+                p->gr.bg = sp_terminal_palette_entry(p->owner, p->params[i + 2]);
                 i += 2;
             } else if (i + 4 < p->nparams && p->params[i + 1] == 2) {
                 uint32_t r = (uint32_t)(p->params[i + 2] & 0xFF);
@@ -344,9 +321,9 @@ static void sp_apply_sgr(sp_parser* p) {
         } else if (pv == 49) {
             p->gr.bg = p->owner->opts.color_bg;
         } else if (pv >= 90 && pv <= 97) {
-            p->gr.fg = sp_palette_default(pv - 90 + 8);
+            p->gr.fg = sp_terminal_palette_entry(p->owner, pv - 90 + 8);
         } else if (pv >= 100 && pv <= 107) {
-            p->gr.bg = sp_palette_default(pv - 100 + 8);
+            p->gr.bg = sp_terminal_palette_entry(p->owner, pv - 100 + 8);
         }
         /* unknown SGR params: ignore */
     }
@@ -481,6 +458,7 @@ static void sp_csi_dispatch(sp_parser* p, uint8_t final_byte) {
                         case 25:   t->cursor_visible = set;
                                    t->cursor.visible = set; break;
                         case 6:    t->origin_mode   = set; break;
+                        case 2004: t->bracketed_paste = set; break;
                         default:   break;
                     }
                 } else {
@@ -567,6 +545,87 @@ static void sp_esc_dispatch(sp_parser* p, uint8_t b) {
 
 /* ---- OSC dispatch ------------------------------------------------------ */
 
+/* Parse a single hex nibble, -1 on failure. */
+static int sp_hex_nib(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+/* Parse "#RRGGBB", "#RGB", or xterm "rgb:RR/GG/BB" / "rgb:RRRR/GGGG/BBBB"
+ * into a 0xRRGGBBAA uint32, alpha always 0xFF. Returns false on any error.
+ * The input buffer need not be NUL-terminated past `len`. */
+static bool sp_parse_color(const char* s, size_t len, uint32_t* out) {
+    if (!s || len == 0) return false;
+    if (s[0] == '#') {
+        if (len == 7) {   /* #RRGGBB */
+            int r1=sp_hex_nib(s[1]),r2=sp_hex_nib(s[2]);
+            int g1=sp_hex_nib(s[3]),g2=sp_hex_nib(s[4]);
+            int b1=sp_hex_nib(s[5]),b2=sp_hex_nib(s[6]);
+            if ((r1|r2|g1|g2|b1|b2) < 0) return false;
+            uint32_t r = (uint32_t)((r1<<4)|r2);
+            uint32_t g = (uint32_t)((g1<<4)|g2);
+            uint32_t b = (uint32_t)((b1<<4)|b2);
+            *out = (r<<24)|(g<<16)|(b<<8)|0xFFu;
+            return true;
+        }
+        if (len == 4) {   /* #RGB */
+            int r=sp_hex_nib(s[1]),g=sp_hex_nib(s[2]),b=sp_hex_nib(s[3]);
+            if ((r|g|b) < 0) return false;
+            uint32_t rr=(uint32_t)((r<<4)|r);
+            uint32_t gg=(uint32_t)((g<<4)|g);
+            uint32_t bb=(uint32_t)((b<<4)|b);
+            *out = (rr<<24)|(gg<<16)|(bb<<8)|0xFFu;
+            return true;
+        }
+        return false;
+    }
+    /* rgb:RR/GG/BB or rgb:RRRR/GGGG/BBBB */
+    if (len >= 4 && (s[0]=='r'||s[0]=='R') && (s[1]=='g'||s[1]=='G') &&
+        (s[2]=='b'||s[2]=='B') && s[3] == ':') {
+        const char* p = s + 4;
+        size_t remain = len - 4;
+        uint32_t ch[3] = {0,0,0};
+        for (int k = 0; k < 3; ++k) {
+            size_t j = 0;
+            uint32_t v = 0;
+            while (j < remain && p[j] != '/' && j < 4) {
+                int n = sp_hex_nib(p[j]);
+                if (n < 0) return false;
+                v = (v << 4) | (uint32_t)n;
+                j++;
+            }
+            if (j == 0) return false;
+            /* Scale down to 8-bit depending on width (xterm style). */
+            if (j == 4) v >>= 8;
+            else if (j == 3) v >>= 4;
+            else if (j == 1) v = v * 0x11;
+            /* j == 2: already 8-bit, no scale. */
+            ch[k] = v & 0xFFu;
+            if (k < 2) {
+                if (j >= remain || p[j] != '/') return false;
+                p += j + 1;
+                remain -= j + 1;
+            } else {
+                p += j;
+                remain -= j;
+            }
+        }
+        *out = (ch[0]<<24)|(ch[1]<<16)|(ch[2]<<8)|0xFFu;
+        return true;
+    }
+    return false;
+}
+
+static void sp_osc_set_color_pair(struct sp_terminal* t, int role,
+                                  const char* s, size_t len) {
+    /* xterm "?" queries return the current color; we don't echo — no-op. */
+    if (len > 0 && s[0] == '?') return;
+    uint32_t v = 0;
+    if (sp_parse_color(s, len, &v)) sp_terminal_set_color(t, role, v);
+}
+
 static void sp_osc_dispatch(sp_parser* p) {
     struct sp_terminal* t = p->owner;
     /* Format: <Ps>;<Pt> */
@@ -585,19 +644,77 @@ static void sp_osc_dispatch(sp_parser* p) {
     }
     if (i < end && p->osc_buf[i] == ';') i++;
 
-    if (ps == 0 || ps == 1 || ps == 2) {
-        /* Window title (and icon name for 0/1) */
-        size_t n = (size_t)(end - i);
+    const char* body = p->osc_buf + i;
+    size_t body_len = (size_t)(end - i);
+
+    switch (ps) {
+    case 0: case 1: case 2: {
+        size_t n = body_len;
         if (n >= sizeof(t->window_title)) n = sizeof(t->window_title) - 1;
-        memcpy(t->window_title, p->osc_buf + i, n);
+        memcpy(t->window_title, body, n);
         t->window_title[n] = '\0';
         sp_event ev = {
             .kind = SP_EV_TITLE,
             .as.title.text = t->window_title,
         };
         sp_terminal_emit(t, &ev);
+        break;
     }
-    /* Other Ps codes (color queries, etc.) — drop for now. */
+    case 4: {
+        /* OSC 4;<idx>;<spec>[;<idx>;<spec>...]. Walk the pairs. */
+        size_t pos = 0;
+        while (pos < body_len) {
+            int idx = 0;
+            size_t ns = pos;
+            while (pos < body_len && body[pos] >= '0' && body[pos] <= '9') {
+                idx = idx * 10 + (body[pos] - '0');
+                pos++;
+            }
+            if (ns == pos || pos >= body_len || body[pos] != ';') break;
+            pos++;
+            size_t vs = pos;
+            while (pos < body_len && body[pos] != ';') pos++;
+            size_t vlen = pos - vs;
+            /* "?" queries return the current color; we don't echo back. */
+            if (vlen > 0 && body[vs] != '?' && idx >= 0 && idx <= 255) {
+                uint32_t v = 0;
+                if (sp_parse_color(body + vs, vlen, &v))
+                    sp_terminal_set_palette_entry(t, idx, v);
+            }
+            if (pos < body_len && body[pos] == ';') pos++;
+        }
+        break;
+    }
+    case 10: sp_osc_set_color_pair(t, SP_COLOR_FG,     body, body_len); break;
+    case 11: sp_osc_set_color_pair(t, SP_COLOR_BG,     body, body_len); break;
+    case 12: sp_osc_set_color_pair(t, SP_COLOR_CURSOR, body, body_len); break;
+    case 104: {
+        /* No args resets the entire 256-color palette. Else reset each
+         * named index. */
+        if (body_len == 0) {
+            for (int k = 0; k < 256; ++k) sp_terminal_reset_palette_entry(t, k);
+        } else {
+            size_t pos = 0;
+            while (pos < body_len) {
+                int idx = 0;
+                size_t ns = pos;
+                while (pos < body_len && body[pos] >= '0' && body[pos] <= '9') {
+                    idx = idx * 10 + (body[pos] - '0');
+                    pos++;
+                }
+                if (ns != pos && idx >= 0 && idx <= 255)
+                    sp_terminal_reset_palette_entry(t, idx);
+                if (pos < body_len && body[pos] == ';') pos++;
+                else break;
+            }
+        }
+        break;
+    }
+    case 110: sp_terminal_reset_color(t, SP_COLOR_FG);     break;
+    case 111: sp_terminal_reset_color(t, SP_COLOR_BG);     break;
+    case 112: sp_terminal_reset_color(t, SP_COLOR_CURSOR); break;
+    default: break;
+    }
 }
 
 /* ---- State machine ----------------------------------------------------- */

@@ -78,6 +78,31 @@ export interface SpTerminal {
     /** UTF-8 encoded as a JS string; the C side measures by byte length. */
     sendKey(utf8: string): void;
     sendMouse(row: number, col: number, button: number, pressed: boolean): void;
+    /** Delivers `text` as a paste. If DECSET 2004 (bracketed paste) is
+     *  active the C side wraps the payload in ESC[200~ / ESC[201~.
+     *  Embedded ESC bytes are stripped regardless, matching xterm. */
+    sendPaste(text: string): void;
+
+    /** Scrollback viewport. `offset` = lines above the live bottom; 0 = pinned
+     *  to bottom (normal). Any subsequent write() resets to 0. */
+    scrollOffset(): number;
+    scrollMax(): number;
+    scrollTo(offset: number): void;
+    scrollLines(delta: number): void;
+    scrollHome(): void;
+    scrollEnd(): void;
+    scrollInfo(): { offset: number; max: number };
+
+    /** Mutable 256-entry palette driving ANSI 0-15, xterm cube, greyscale,
+     *  and 38;5;N / 48;5;N. OSC 4 writes into the same table. Values are
+     *  0xRRGGBBAA. */
+    setPaletteEntry(idx: number, rgba: number): void;
+    getPaletteEntry(idx: number): number;
+    setPalette(arr: number[]): void;
+    getPalette(): number[];
+    /** role: 0=FG, 1=BG, 2=CURSOR, 3=SELECTION (SP_COLOR_*). */
+    setColor(role: number, rgba: number): void;
+    getColor(role: number): number;
 
     /** Framebuffer pixels (includes devicePixelRatio). */
     cellWidth(): number;
