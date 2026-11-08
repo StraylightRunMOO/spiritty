@@ -312,3 +312,47 @@ SP_TEST(parser, decstbm_scrolls_only_region) {
     ASSERT_EQ_INT(sp_terminal_cell_at(t, 2, 0)->codepoint, (uint32_t)'D');
     sp_terminal_destroy(t);
 }
+
+/* ---- CJK wide cells --------------------------------------------------- */
+
+SP_TEST(parser, cjk_hiragana_occupies_two_cells) {
+    sp_terminal* t = mk_term(10, 1);
+    /* あ = U+3042 (Hiragana A) — 3 UTF-8 bytes. */
+    feed(t, "\xE3\x81\x82");
+    const sp_cell* c0 = sp_terminal_cell_at(t, 0, 0);
+    const sp_cell* c1 = sp_terminal_cell_at(t, 0, 1);
+    ASSERT_EQ_INT(c0->codepoint, 0x3042u);
+    ASSERT_EQ_INT(c0->width,     2);
+    /* Continuation cell: width 0, codepoint 0. */
+    ASSERT_EQ_INT(c1->codepoint, 0u);
+    ASSERT_EQ_INT(c1->width,     0);
+    int32_t r, c; sp_terminal_get_cursor(t, &r, &c);
+    ASSERT_EQ_INT(r, 0);
+    ASSERT_EQ_INT(c, 2);         /* cursor advanced by TWO */
+    sp_terminal_destroy(t);
+}
+
+SP_TEST(parser, cjk_wide_wraps_at_right_margin) {
+    sp_terminal* t = mk_term(3, 3);
+    /* 2 narrow chars at cols 0 and 1 leave only col 2. A wide char at
+     * col 2 doesn't fit, must wrap. Row 0 col 2 becomes blank, wide
+     * lands at row 1 col 0. */
+    feed(t, "ab");
+    feed(t, "\xE3\x81\x82");     /* あ */
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, (uint32_t)'a');
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 1)->codepoint, (uint32_t)'b');
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 2)->codepoint, (uint32_t)' ');
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 1, 0)->codepoint, 0x3042u);
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 1, 0)->width,     2);
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 1, 1)->width,     0);
+    sp_terminal_destroy(t);
+}
+
+SP_TEST(parser, cjk_cjk_unified_ideograph) {
+    sp_terminal* t = mk_term(5, 1);
+    /* 美 = U+7F8E (CJK Unified) — 3 UTF-8 bytes 0xE7 0xBE 0x8E */
+    feed(t, "\xE7\xBE\x8E");
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, 0x7F8Eu);
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->width,     2);
+    sp_terminal_destroy(t);
+}

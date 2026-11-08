@@ -17,6 +17,7 @@
 #endif
 
 #include "internal.h"
+#include "wcwidth.h"
 
 #include <stdalign.h>
 #include <stdlib.h>
@@ -677,9 +678,26 @@ void sp_buffer_write_cp(sp_buffer* b, int32_t row, int32_t col,
                         uint32_t cp, sp_cell_attrs attrs) {
     sp_cell* c = sp_buffer_cell(b, row, col);
     if (!c) return;
+    int w = sp_cp_width(cp);
+    /* A wide char at the last column has nowhere for its continuation
+     * cell. The parser is responsible for wrapping first; here we just
+     * degrade to narrow so the buffer stays consistent. */
+    if (w == 2 && col + 1 >= b->cols) w = 1;
     c->codepoint = cp;
-    c->width     = 1;
+    c->width     = (uint8_t)w;
     c->attrs     = attrs;
+    if (w == 2) {
+        /* Mark the continuation cell: codepoint 0, width 0 so the
+         * renderer can tell "already drawn by neighbor to the left"
+         * from "empty/space" (which is also codepoint 0 but width 1).
+         * NOTE: overwriting a wide char's left cell with a narrow char
+         * will leave an orphan continuation at col+1 — the parser
+         * clears those on write, but direct buffer writes should too. */
+        sp_cell* r = &b->visible[row].cells[col + 1];
+        r->codepoint = 0;
+        r->width     = 0;
+        r->attrs     = attrs;
+    }
     if (row >= 0 && row < b->rows) b->visible[row].dirty = true;
 }
 

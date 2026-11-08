@@ -14,6 +14,7 @@
 #define SPIRITTY_BUILDING 1
 
 #include "internal.h"
+#include "wcwidth.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -163,13 +164,35 @@ static void sp_newline(struct sp_terminal* t) {
 static void sp_handle_print_cp(sp_parser* p, uint32_t cp) {
     struct sp_terminal* t = p->owner;
     if (!t || !t->buf) return;
+    int w = sp_cp_width(cp);
+    int32_t cols = sp_buffer_cols(t->buf);
+    /* A wide char that doesn't fit at the right margin wraps first.
+     * xterm leaves the last column blank. Without auto-wrap we drop
+     * the char entirely (same as narrow chars pinned at the margin). */
+    if (w == 2 && t->cursor.col + 1 >= cols) {
+        if (!t->auto_wrap) return;
+        sp_buffer_write_cp(t->buf, t->cursor.row, t->cursor.col, ' ', p->gr);
+        t->cursor.col = 0;
+        int32_t bot = sp_buffer_scroll_bot(t->buf);
+        if (t->cursor.row == bot) {
+            sp_buffer_scroll_up(t->buf, 1, t->default_attrs);
+        } else if (t->cursor.row + 1 < sp_buffer_rows(t->buf)) {
+            t->cursor.row++;
+        }
+    }
     sp_buffer_write_cp(t->buf, t->cursor.row, t->cursor.col, cp, p->gr);
     /* Tag the cell we just wrote with the current OSC 8 URI (if any).
-     * Written before the cursor advance so the coordinates are right. */
+     * Written before the cursor advance so the coordinates are right.
+     * For a wide char we tag both cells so hit-tests on either half
+     * return the same URI. */
     if (t->current_uri_id != 0) {
         sp_buffer_set_uri(t->buf, t->cursor.row, t->cursor.col, t->current_uri_id);
+        if (w == 2 && t->cursor.col + 1 < cols)
+            sp_buffer_set_uri(t->buf, t->cursor.row, t->cursor.col + 1,
+                              t->current_uri_id);
     }
     sp_cursor_advance(t);
+    if (w == 2) sp_cursor_advance(t);
 }
 
 static void sp_handle_print(sp_parser* p, uint8_t byte) {
