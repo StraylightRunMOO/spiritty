@@ -385,3 +385,24 @@ SP_TEST(parser, cjk_narrow_over_wide_right_clears_leader) {
     ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 1)->width,     1);
     sp_terminal_destroy(t);
 }
+
+SP_TEST(parser, emoji_is_wide) {
+    sp_terminal* t = mk_term(5, 1);
+    /* U+1F600 😀 = 4-byte UTF-8 F0 9F 98 80 */
+    feed(t, "\xF0\x9F\x98\x80");
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, 0x1F600u);
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->width,     2);
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 1)->width,     0);
+    int32_t r, c; sp_terminal_get_cursor(t, &r, &c);
+    ASSERT_EQ_INT(c, 2);
+    sp_terminal_destroy(t);
+}
+
+SP_TEST(parser, regional_indicator_is_wide) {
+    sp_terminal* t = mk_term(5, 1);
+    /* U+1F1F8 🇸 regional-indicator-letter-S = F0 9F 87 B8 */
+    feed(t, "\xF0\x9F\x87\xB8");
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, 0x1F1F8u);
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->width,     2);
+    sp_terminal_destroy(t);
+}
