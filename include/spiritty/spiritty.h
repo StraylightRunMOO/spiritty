@@ -140,7 +140,8 @@ typedef enum {
     SP_EV_BELL       = 3,
     SP_EV_CURSOR     = 4,
     SP_EV_SCROLL     = 5,
-    SP_EV_SELECTION  = 6
+    SP_EV_SELECTION  = 6,
+    SP_EV_CLIPBOARD  = 7   /* OSC 52 set request: text + selection target */
 } sp_event_kind;
 
 typedef struct {
@@ -151,6 +152,8 @@ typedef struct {
         struct { const char* text; }                 title;
         struct { int32_t row, col; bool visible; }   cursor;
         struct { int32_t top; }                      scroll;
+        struct { const char* text; size_t len;
+                 const char* targets; }              clipboard;
     } as;
 } sp_event;
 

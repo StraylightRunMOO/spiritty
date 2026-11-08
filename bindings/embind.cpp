@@ -187,6 +187,15 @@ private:
             case SP_EV_SELECTION:
                 out.set("kind", std::string("selection"));
                 break;
+            case SP_EV_CLIPBOARD: {
+                out.set("kind", std::string("clipboard"));
+                /* text is UTF-8 bytes of length ev->as.clipboard.len.
+                 * std::string copies by length so embedded NULs survive. */
+                const auto& c = ev->as.clipboard;
+                out.set("text", std::string(c.text ? c.text : "", c.len));
+                out.set("targets", std::string(c.targets ? c.targets : ""));
+                break;
+            }
             default:
                 out.set("kind", std::string("unknown"));
                 break;

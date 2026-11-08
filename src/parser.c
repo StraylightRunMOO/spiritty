@@ -754,6 +754,69 @@ static void sp_osc_dispatch(sp_parser* p) {
     case 110: sp_terminal_reset_color(t, SP_COLOR_FG);     break;
     case 111: sp_terminal_reset_color(t, SP_COLOR_BG);     break;
     case 112: sp_terminal_reset_color(t, SP_COLOR_CURSOR); break;
+    case 52: {
+        /* OSC 52 ; Pc ; Pd ST — set clipboard. Pc is a target list
+         * (c=CLIPBOARD, p=PRIMARY, s=SELECTION, 0-7=xterm cut-buffers,
+         * empty = c+s0). Pd is base64, or "?" for a query. Queries
+         * aren't honored: echoing clipboard contents back to the TTY
+         * is the attack vector OSC 52 is most known for, and the host
+         * can't read the system clipboard in a trusted way anyway. */
+        size_t pos = 0;
+        size_t targets_s = pos;
+        while (pos < body_len && body[pos] != ';') pos++;
+        size_t targets_e = pos;
+        if (pos < body_len) pos++;  /* skip ';' */
+        const char* payload = body + pos;
+        size_t plen = body_len - pos;
+        /* Query form — drop silently. */
+        if (plen == 1 && payload[0] == '?') break;
+        /* RFC 4648 base64 decode, inline. Reject any byte outside the
+         * alphabet so a malformed payload never writes the clipboard. */
+        size_t effective = plen;
+        while (effective > 0 && payload[effective - 1] == '=') effective--;
+        /* Cap decoded length: xterm's default is 1 MiB; we match. */
+        if (effective > 1u << 20) break;
+        size_t out_cap = (effective / 4) * 3 + 3;
+        char* decoded = (char*)malloc(out_cap + 1);
+        if (!decoded) break;
+        size_t out_len = 0;
+        uint32_t acc = 0;
+        int bits = 0;
+        bool bad = false;
+        for (size_t k = 0; k < effective; k++) {
+            unsigned char c = (unsigned char)payload[k];
+            if (c == '\r' || c == '\n' || c == ' ') continue;
+            int v = -1;
+            if (c >= 'A' && c <= 'Z')      v = c - 'A';
+            else if (c >= 'a' && c <= 'z') v = 26 + (c - 'a');
+            else if (c >= '0' && c <= '9') v = 52 + (c - '0');
+            else if (c == '+')             v = 62;
+            else if (c == '/')             v = 63;
+            if (v < 0) { bad = true; break; }
+            acc = (acc << 6) | (uint32_t)v;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                decoded[out_len++] = (char)((acc >> bits) & 0xFF);
+            }
+        }
+        if (bad) { free(decoded); break; }
+        decoded[out_len] = '\0';
+        /* Build a NUL-terminated targets string on the stack. */
+        char targets[16];
+        size_t tn = targets_e - targets_s;
+        if (tn >= sizeof(targets)) tn = sizeof(targets) - 1;
+        memcpy(targets, body + targets_s, tn);
+        targets[tn] = '\0';
+        sp_event ev = {
+            .kind = SP_EV_CLIPBOARD,
+            .as.clipboard = { .text = decoded, .len = out_len,
+                              .targets = targets },
+        };
+        sp_terminal_emit(t, &ev);
+        free(decoded);
+        break;
+    }
     default: break;
     }
 }
