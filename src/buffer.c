@@ -683,16 +683,36 @@ void sp_buffer_write_cp(sp_buffer* b, int32_t row, int32_t col,
      * cell. The parser is responsible for wrapping first; here we just
      * degrade to narrow so the buffer stays consistent. */
     if (w == 2 && col + 1 >= b->cols) w = 1;
+    /* Orphan sweep: clearing a half of a wide-char pair breaks the
+     * other half unless we also clear it. Both directions:
+     *   - If we're landing on a continuation cell (width 0), the
+     *     wide char at col-1 has no partner any more → blank it out.
+     *   - If we're landing on a wide cell (width 2), the continuation
+     *     at col+1 has no leader any more → blank it out.
+     * Done before writing so a wide-over-wide write doesn't zap its
+     * own new continuation. uri_grid entries on the stale half are
+     * cleared too — a stranded URI tag would survive otherwise. */
+    if (col > 0 && c->width == 0) {
+        sp_cell* prev = &b->visible[row].cells[col - 1];
+        prev->codepoint = ' ';
+        prev->width     = 1;
+        if (b->uri_grid)
+            b->uri_grid[(size_t)row * (size_t)b->cols + (size_t)(col - 1)] = 0;
+    }
+    if (col + 1 < b->cols && c->width == 2) {
+        sp_cell* next = &b->visible[row].cells[col + 1];
+        next->codepoint = ' ';
+        next->width     = 1;
+        if (b->uri_grid)
+            b->uri_grid[(size_t)row * (size_t)b->cols + (size_t)(col + 1)] = 0;
+    }
     c->codepoint = cp;
     c->width     = (uint8_t)w;
     c->attrs     = attrs;
     if (w == 2) {
         /* Mark the continuation cell: codepoint 0, width 0 so the
          * renderer can tell "already drawn by neighbor to the left"
-         * from "empty/space" (which is also codepoint 0 but width 1).
-         * NOTE: overwriting a wide char's left cell with a narrow char
-         * will leave an orphan continuation at col+1 — the parser
-         * clears those on write, but direct buffer writes should too. */
+         * from "empty/space" (which is also codepoint 0 but width 1). */
         sp_cell* r = &b->visible[row].cells[col + 1];
         r->codepoint = 0;
         r->width     = 0;

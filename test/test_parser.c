@@ -356,3 +356,32 @@ SP_TEST(parser, cjk_cjk_unified_ideograph) {
     ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->width,     2);
     sp_terminal_destroy(t);
 }
+
+SP_TEST(parser, cjk_narrow_over_wide_left_clears_continuation) {
+    sp_terminal* t = mk_term(5, 1);
+    /* Write 'あ' at col 0 — occupies cols 0..1. */
+    feed(t, "\xE3\x81\x82");
+    /* Cursor is now at col 2. Move to col 0 and write 'X'. The
+     * continuation at col 1 must become a plain space, not stay as
+     * a width-0 orphan. */
+    feed(t, "\x1b[1;1HX");
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, (uint32_t)'X');
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->width,     1);
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 1)->codepoint, (uint32_t)' ');
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 1)->width,     1);
+    sp_terminal_destroy(t);
+}
+
+SP_TEST(parser, cjk_narrow_over_wide_right_clears_leader) {
+    sp_terminal* t = mk_term(5, 1);
+    /* Write 'あ' at col 0 — occupies cols 0..1. */
+    feed(t, "\xE3\x81\x82");
+    /* Move to col 1 (the continuation cell) and write 'X'. The leader
+     * 'あ' at col 0 is now orphaned — must become a plain space. */
+    feed(t, "\x1b[1;2HX");
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, (uint32_t)' ');
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->width,     1);
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 1)->codepoint, (uint32_t)'X');
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 1)->width,     1);
+    sp_terminal_destroy(t);
+}
