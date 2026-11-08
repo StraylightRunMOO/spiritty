@@ -278,6 +278,37 @@ static size_t sp_terminal_flatten_active(sp_terminal* t) {
             memset(dst, 0, (size_t)cols * sizeof(sp_cell));
         }
     }
+
+    /* Paint selection into the scratch bg so the renderer picks it up
+     * through the normal cell_bg path. Overwriting the original bg is
+     * standard terminal behaviour; proper alpha blending would need a
+     * second bg pass. Selection coordinates are in active-screen rows;
+     * translate by the scroll offset so a selection made at the live
+     * bottom stays painted while the user scrolls up into history. */
+    if (sp_selmgr_active(t->selmgr)) {
+        const sp_selection* s = sp_selmgr_selection(t->selmgr);
+        if (s) {
+            int32_t sr = s->start_row, sc = s->start_col;
+            int32_t er = s->end_row,   ec = s->end_col;
+            if (sr > er || (sr == er && sc > ec)) {
+                int32_t tr = sr, tc = sc; sr = er; sc = ec; er = tr; ec = tc;
+            }
+            sr += (int32_t)offset;
+            er += (int32_t)offset;
+            uint32_t sel_rgba = t->opts.color_selection;
+            for (int32_t r = sr; r <= er && r < rows; ++r) {
+                if (r < 0) continue;
+                int32_t col_lo = (r == sr) ? sc : 0;
+                int32_t col_hi = (r == er) ? ec : (cols - 1);
+                if (col_lo < 0) col_lo = 0;
+                if (col_hi >= cols) col_hi = cols - 1;
+                sp_cell* row = t->render_scratch + (size_t)r * (size_t)cols;
+                for (int32_t c = col_lo; c <= col_hi; ++c) {
+                    row[c].attrs.bg = sel_rgba;
+                }
+            }
+        }
+    }
     return needed;
 }
 
