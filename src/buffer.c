@@ -519,11 +519,16 @@ void sp_buffer_scroll_up(sp_buffer* b, int32_t count, sp_cell_attrs def) {
     int32_t top = b->scroll_top, bot = b->scroll_bot;
     int32_t region_rows = bot - top + 1;
     if (count > region_rows) count = region_rows;
-    /* xterm: only full-screen scroll carries into the scrollback. A region
-     * that starts below row 0 drops the evicted lines on the floor. */
-    const bool full = (top == 0 && bot == b->rows - 1);
+    /* Push evicted top-of-region lines into scrollback whenever the
+     * region is top-anchored. A region that starts below row 0 can't
+     * meaningfully archive (its top row is live user data outside the
+     * region, not what the scroll is evicting), so those drop. This
+     * matters for the common "reserve the last row for a status line
+     * or prompt" pattern — scrolling within [0, rows-2] should still
+     * build history. */
+    const bool archives = (top == 0);
     for (int32_t i = 0; i < count; ++i) {
-        if (full) {
+        if (archives) {
             sp_line out = b->visible[0];
             sb_push(&b->sb, out);
         } else {
