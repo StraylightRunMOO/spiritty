@@ -253,3 +253,62 @@ SP_TEST(parser, malformed_csi_returns_to_ground) {
     ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, (uint32_t)'X');
     sp_terminal_destroy(t);
 }
+
+/* ---- Alt-screen (DECSET 1049) ----------------------------------------- */
+
+SP_TEST(parser, decset_1049_saves_and_restores_cursor) {
+    sp_terminal* t = mk_term(10, 10);
+    feed(t, "\x1b[5;7H");            /* row 4, col 6 (0-based 4,6) */
+    feed(t, "\x1b[?1049h");          /* enter alt, save cursor, home */
+    int32_t r, c; sp_terminal_get_cursor(t, &r, &c);
+    ASSERT_EQ_INT(r, 0);
+    ASSERT_EQ_INT(c, 0);
+    feed(t, "\x1b[?1049l");          /* leave alt, restore cursor */
+    sp_terminal_get_cursor(t, &r, &c);
+    ASSERT_EQ_INT(r, 4);
+    ASSERT_EQ_INT(c, 6);
+    sp_terminal_destroy(t);
+}
+
+SP_TEST(parser, decset_1049_isolates_screens) {
+    sp_terminal* t = mk_term(10, 3);
+    feed(t, "AAA");                  /* primary row 0 = "AAA" */
+    feed(t, "\x1b[?1049h");          /* enter alt; alt is blank */
+    /* Alt cell (0,0) should be empty (space or zero), not 'A'. */
+    ASSERT_NE_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, (uint32_t)'A');
+    feed(t, "BBB");                  /* alt row 0 = "BBB" */
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, (uint32_t)'B');
+    feed(t, "\x1b[?1049l");          /* leave alt */
+    /* Primary unchanged — "AAA" still at row 0. */
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, (uint32_t)'A');
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 2)->codepoint, (uint32_t)'A');
+    sp_terminal_destroy(t);
+}
+
+/* ---- DECSTBM scroll region -------------------------------------------- */
+
+SP_TEST(parser, decstbm_homes_cursor) {
+    sp_terminal* t = mk_term(10, 10);
+    feed(t, "\x1b[5;5H");
+    feed(t, "\x1b[3;8r");            /* region rows 3..8, cursor homes */
+    int32_t r, c; sp_terminal_get_cursor(t, &r, &c);
+    ASSERT_EQ_INT(r, 0);
+    ASSERT_EQ_INT(c, 0);
+    sp_terminal_destroy(t);
+}
+
+SP_TEST(parser, decstbm_scrolls_only_region) {
+    sp_terminal* t = mk_term(5, 5);
+    /* Fill rows 0..4 with row-marker letters A..E. */
+    feed(t, "A\r\nB\r\nC\r\nD\r\nE");
+    /* Region rows 3..5 (1-based) = internal rows 2..4. */
+    feed(t, "\x1b[3;5r");
+    /* Move to last row of region, feed LF → region scrolls up; rows 0/1
+     * (A, B) must remain intact. */
+    feed(t, "\x1b[5;1H\n");
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 0, 0)->codepoint, (uint32_t)'A');
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 1, 0)->codepoint, (uint32_t)'B');
+    /* Row 2 of screen (top of region) was 'C' — now 'D' after scroll. */
+    ASSERT_EQ_INT(sp_terminal_cell_at(t, 2, 0)->codepoint, (uint32_t)'D');
+    sp_terminal_destroy(t);
+}

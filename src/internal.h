@@ -85,6 +85,14 @@ void sp_buffer_clear_range(sp_buffer* b,
 void sp_buffer_scroll_up(sp_buffer* b, int32_t count, sp_cell_attrs def);
 void sp_buffer_scroll_down(sp_buffer* b, int32_t count, sp_cell_attrs def);
 
+/* DECSTBM scroll region. Rows are 0-based inclusive. The default region
+ * is the whole screen (0, rows-1). scroll_up / scroll_down affect only
+ * the region; a region that starts above row 0 also skips the scrollback
+ * push (matches xterm — you don't preserve partial-region content). */
+int32_t sp_buffer_scroll_top(const sp_buffer* b);
+int32_t sp_buffer_scroll_bot(const sp_buffer* b);
+void    sp_buffer_set_scroll_region(sp_buffer* b, int32_t top, int32_t bot);
+
 void sp_buffer_insert_lines(sp_buffer* b, int32_t row, int32_t count,
                             sp_cell_attrs def);
 void sp_buffer_delete_lines(sp_buffer* b, int32_t row, int32_t count,
@@ -180,6 +188,12 @@ struct sp_terminal {
     void*         event_user;
 
     sp_buffer*    buf;
+    /* Alt-screen (DECSET 1049 / 1047). Created on first toggle; `on_alt`
+     * is true while `buf` points at it. `alt_saved_cursor` stashes the
+     * primary cursor across 1048/1049. Both buffers resize together. */
+    sp_buffer*    alt_buf;
+    bool          on_alt;
+    sp_cursor     alt_saved_cursor;
     sp_parser*    parser;
     sp_selmgr*    selmgr;
 
@@ -226,6 +240,13 @@ const char* sp_terminal_uri_lookup(const struct sp_terminal* t, uint16_t id);
 /* Mouse-reporting mode toggles. Flipped by DECSET/DECRST in parser.c; also
  * exposed publicly via sp_terminal_mouse_mode() for host introspection. */
 void sp_terminal_set_mouse_mode(struct sp_terminal* t, int mode, bool set);
+
+/* Alt-screen swap. Enter creates alt_buf on demand, saves cursor, swaps
+ * `t->buf` to point at the alt, and optionally clears it (DECSET 1049).
+ * Leave restores the saved cursor on 1049 and swaps back; no-op if the
+ * terminal is not currently on alt. */
+void sp_terminal_alt_enter(struct sp_terminal* t, bool save_and_clear);
+void sp_terminal_alt_leave(struct sp_terminal* t, bool restore_cursor);
 
 /* Clamp helper used by parser/selmgr/terminal. */
 static inline int32_t sp_clamp_i32(int32_t v, int32_t lo, int32_t hi) {

@@ -335,6 +335,10 @@ struct sp_buffer {
      * scroll_up/scroll_down; zeroed on clear/insert/delete. NOT carried
      * into scrollback — hit-tests on scrolled-up rows return 0. */
     uint16_t*     uri_grid;
+    /* DECSTBM scroll region (inclusive, 0-based). Defaults to the full
+     * screen. scroll_up/scroll_down operate within this range. */
+    int32_t       scroll_top;
+    int32_t       scroll_bot;
 };
 
 sp_buffer* sp_buffer_create(int32_t rows, int32_t cols, int32_t sb_max) {
@@ -359,7 +363,23 @@ sp_buffer* sp_buffer_create(int32_t rows, int32_t cols, int32_t sb_max) {
     b->uri_grid = (uint16_t*)calloc((size_t)rows * (size_t)cols, sizeof(uint16_t));
     /* uri_grid is best-effort — we don't fail buffer creation on OOM here;
      * hit-tests just return 0 when the grid is absent. */
+    b->scroll_top = 0;
+    b->scroll_bot = rows - 1;
     return b;
+}
+
+int32_t sp_buffer_scroll_top(const sp_buffer* b) { return b ? b->scroll_top : 0; }
+int32_t sp_buffer_scroll_bot(const sp_buffer* b) { return b ? b->scroll_bot : 0; }
+
+void sp_buffer_set_scroll_region(sp_buffer* b, int32_t top, int32_t bot) {
+    if (!b) return;
+    if (top < 0) top = 0;
+    if (bot >= b->rows) bot = b->rows - 1;
+    /* Degenerate (top > bot or single-row region) → reset to full screen,
+     * matching xterm: an invalid DECSTBM homes the scroll region. */
+    if (top >= bot) { top = 0; bot = b->rows - 1; }
+    b->scroll_top = top;
+    b->scroll_bot = bot;
 }
 
 void sp_buffer_destroy(sp_buffer* b) {
@@ -436,6 +456,13 @@ void sp_buffer_resize(sp_buffer* b, int32_t rows, int32_t cols, sp_cell_attrs de
      * — the old content is reflowed anyway so coordinates would be stale). */
     free(b->uri_grid);
     b->uri_grid = (uint16_t*)calloc((size_t)b->rows * (size_t)b->cols, sizeof(uint16_t));
+    /* Scroll region: reset to the full new screen. An explicitly set
+     * region from before the resize is stale either way (xterm does
+     * the same — apps re-send DECSTBM after SIGWINCH). Always resetting
+     * also keeps `scroll_up` able to push into scrollback when the
+     * caller never touched DECSTBM. */
+    b->scroll_top = 0;
+    b->scroll_bot = b->rows - 1;
 }
 
 static void sp_buf_uri_zero_row(sp_buffer* b, int32_t row) {
@@ -488,50 +515,62 @@ void sp_buffer_clear_range(sp_buffer* b,
 
 void sp_buffer_scroll_up(sp_buffer* b, int32_t count, sp_cell_attrs def) {
     if (!b || count <= 0) return;
-    if (count > b->rows) count = b->rows;
+    int32_t top = b->scroll_top, bot = b->scroll_bot;
+    int32_t region_rows = bot - top + 1;
+    if (count > region_rows) count = region_rows;
+    /* xterm: only full-screen scroll carries into the scrollback. A region
+     * that starts below row 0 drops the evicted lines on the floor. */
+    const bool full = (top == 0 && bot == b->rows - 1);
     for (int32_t i = 0; i < count; ++i) {
-        /* Push topmost line to scrollback (transfer ownership). */
-        sp_line out = b->visible[0];
-        sb_push(&b->sb, out);
-        /* Shift remaining rows up. */
-        for (int32_t r = 1; r < b->rows; ++r) {
+        if (full) {
+            sp_line out = b->visible[0];
+            sb_push(&b->sb, out);
+        } else {
+            sp_line_free(&b->visible[top]);
+        }
+        for (int32_t r = top + 1; r <= bot; ++r) {
             b->visible[r - 1] = b->visible[r];
         }
-        /* New blank at the bottom. */
         sp_line nl;
         sp_line_init(&nl, b->cols);
         for (int32_t c = 0; c < b->cols; ++c) nl.cells[c].attrs = def;
-        b->visible[b->rows - 1] = nl;
+        b->visible[bot] = nl;
     }
     if (b->uri_grid) {
         size_t stride = (size_t)b->cols;
-        size_t keep = (size_t)(b->rows - count) * stride;
-        memmove(b->uri_grid, b->uri_grid + (size_t)count * stride,
-                keep * sizeof(uint16_t));
-        memset(b->uri_grid + keep, 0, (size_t)count * stride * sizeof(uint16_t));
+        size_t keep_rows = (size_t)(region_rows - count);
+        memmove(b->uri_grid + (size_t)top * stride,
+                b->uri_grid + (size_t)(top + count) * stride,
+                keep_rows * stride * sizeof(uint16_t));
+        memset(b->uri_grid + (size_t)(bot + 1 - count) * stride, 0,
+               (size_t)count * stride * sizeof(uint16_t));
     }
     sp_buffer_mark_all_dirty(b);
 }
 
 void sp_buffer_scroll_down(sp_buffer* b, int32_t count, sp_cell_attrs def) {
     if (!b || count <= 0) return;
-    if (count > b->rows) count = b->rows;
+    int32_t top = b->scroll_top, bot = b->scroll_bot;
+    int32_t region_rows = bot - top + 1;
+    if (count > region_rows) count = region_rows;
     for (int32_t i = 0; i < count; ++i) {
-        sp_line_free(&b->visible[b->rows - 1]);
-        for (int32_t r = b->rows - 1; r > 0; --r) {
+        sp_line_free(&b->visible[bot]);
+        for (int32_t r = bot; r > top; --r) {
             b->visible[r] = b->visible[r - 1];
         }
         sp_line nl;
         sp_line_init(&nl, b->cols);
         for (int32_t c = 0; c < b->cols; ++c) nl.cells[c].attrs = def;
-        b->visible[0] = nl;
+        b->visible[top] = nl;
     }
     if (b->uri_grid) {
         size_t stride = (size_t)b->cols;
-        size_t keep = (size_t)(b->rows - count) * stride;
-        memmove(b->uri_grid + (size_t)count * stride, b->uri_grid,
-                keep * sizeof(uint16_t));
-        memset(b->uri_grid, 0, (size_t)count * stride * sizeof(uint16_t));
+        size_t keep_rows = (size_t)(region_rows - count);
+        memmove(b->uri_grid + (size_t)(top + count) * stride,
+                b->uri_grid + (size_t)top * stride,
+                keep_rows * stride * sizeof(uint16_t));
+        memset(b->uri_grid + (size_t)top * stride, 0,
+               (size_t)count * stride * sizeof(uint16_t));
     }
     sp_buffer_mark_all_dirty(b);
 }

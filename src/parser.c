@@ -131,15 +131,16 @@ static void sp_cursor_set(struct sp_terminal* t, int32_t row, int32_t col) {
 static void sp_cursor_advance(struct sp_terminal* t) {
     int32_t cols = sp_buffer_cols(t->buf);
     int32_t rows = sp_buffer_rows(t->buf);
+    int32_t bot  = sp_buffer_scroll_bot(t->buf);
     if (t->cursor.col + 1 < cols) {
         t->cursor.col++;
     } else if (t->auto_wrap) {
         t->cursor.col = 0;
-        if (t->cursor.row + 1 < rows) {
-            t->cursor.row++;
-        } else {
+        if (t->cursor.row == bot) {
             sp_buffer_scroll_up(t->buf, 1, t->default_attrs);
-            /* row stays at last row */
+            /* cursor stays at the region's bottom */
+        } else if (t->cursor.row + 1 < rows) {
+            t->cursor.row++;
         }
     }
     /* else: pinned at right margin */
@@ -147,11 +148,14 @@ static void sp_cursor_advance(struct sp_terminal* t) {
 
 static void sp_newline(struct sp_terminal* t) {
     int32_t rows = sp_buffer_rows(t->buf);
-    if (t->cursor.row + 1 < rows) {
-        t->cursor.row++;
-    } else {
+    int32_t bot  = sp_buffer_scroll_bot(t->buf);
+    if (t->cursor.row == bot) {
         sp_buffer_scroll_up(t->buf, 1, t->default_attrs);
+    } else if (t->cursor.row + 1 < rows) {
+        t->cursor.row++;
     }
+    /* else: cursor outside region (below bot but on last screen row) —
+     * don't scroll, don't move. Matches xterm. */
 }
 
 /* ---- Print handler ----------------------------------------------------- */
@@ -472,6 +476,24 @@ static void sp_csi_dispatch(sp_parser* p, uint8_t final_byte) {
                         case 1015:
                             sp_terminal_set_mouse_mode(t, v, set);
                             break;
+                        case 1047:
+                            /* Switch screen buffers; cursor state untouched.
+                             * On entering alt, clear it (xterm). */
+                            if (set && !t->on_alt)      sp_terminal_alt_enter(t, false);
+                            else if (!set && t->on_alt) sp_terminal_alt_leave(t, false);
+                            break;
+                        case 1048:
+                            /* Save/restore cursor (DECSC/DECRC equivalent). */
+                            if (set) t->alt_saved_cursor = t->cursor;
+                            else     t->cursor = t->alt_saved_cursor;
+                            break;
+                        case 1049:
+                            /* DECSET 1049 = 1048 (save cursor) + 1047 with
+                             * clear-on-enter. DECRST 1049 = swap back +
+                             * restore cursor. What most TUIs actually use. */
+                            if (set && !t->on_alt)      sp_terminal_alt_enter(t, true);
+                            else if (!set && t->on_alt) sp_terminal_alt_leave(t, true);
+                            break;
                         default:   break;
                     }
                 } else {
@@ -487,7 +509,19 @@ static void sp_csi_dispatch(sp_parser* p, uint8_t final_byte) {
             sp_apply_sgr(p);
             t->default_attrs = p->gr;
             break;
-        case 'r': /* DECSTBM (ignored — single-region for now) */
+        case 'r': { /* DECSTBM — set top & bottom scrolling margins */
+            int32_t nrows = sp_buffer_rows(t->buf);
+            int32_t top   = sp_parser_param(p, 0, 1);
+            int32_t bot   = sp_parser_param(p, 1, nrows);
+            if (top < 1)     top = 1;
+            if (bot > nrows) bot = nrows;
+            /* Invalid pair → full-screen region (already what set_region
+             * does for top >= bot). DECSTBM also homes the cursor. */
+            sp_buffer_set_scroll_region(t->buf, top - 1, bot - 1);
+            t->cursor.row = 0;
+            t->cursor.col = 0;
+            break;
+        }
         case 's': /* DECSLRM / save cursor (ignored for left/right margin) */
             break;
         case 'u': /* restore cursor (ANSI.SYS) */
@@ -535,10 +569,10 @@ static void sp_esc_dispatch(sp_parser* p, uint8_t b) {
             sp_newline(t);
             break;
         case 'M': /* RI — reverse index */
-            if (t->cursor.row > 0) {
-                t->cursor.row--;
-            } else {
+            if (t->cursor.row == sp_buffer_scroll_top(t->buf)) {
                 sp_buffer_scroll_down(t->buf, 1, t->default_attrs);
+            } else if (t->cursor.row > 0) {
+                t->cursor.row--;
             }
             break;
         case 'c': /* RIS — full reset */

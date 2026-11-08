@@ -135,6 +135,7 @@ void sp_terminal_destroy(sp_terminal* t) {
     sp_selmgr_destroy(t->selmgr);
     sp_parser_destroy(t->parser);
     sp_buffer_destroy(t->buf);
+    if (t->alt_buf) sp_buffer_destroy(t->alt_buf);
     for (int i = 0; i < SP_URI_CAP; i++) free(t->uri_table.uris[i]);
     free(t->render_scratch);
     free(t);
@@ -164,6 +165,10 @@ void sp_terminal_write(sp_terminal* SPIRITTY_RESTRICT t,
 void sp_terminal_resize(sp_terminal* t, int32_t cols, int32_t rows) {
     if (!t || cols <= 0 || rows <= 0) return;
     sp_buffer_resize(t->buf, rows, cols, t->default_attrs);
+    /* Keep the standby buffer dimensionally matched so a swap doesn't
+     * surprise the renderer with a mismatched screen size. */
+    if (t->alt_buf)
+        sp_buffer_resize(t->alt_buf, rows, cols, t->default_attrs);
     t->opts.cols = cols;
     t->opts.rows = rows;
     if (t->cursor.row >= rows) t->cursor.row = rows - 1;
@@ -174,6 +179,36 @@ void sp_terminal_resize(sp_terminal* t, int32_t cols, int32_t rows) {
         .as.resize.rows = rows,
     };
     sp_terminal_emit(t, &ev);
+}
+
+void sp_terminal_alt_enter(struct sp_terminal* t, bool save_and_clear) {
+    if (!t || t->on_alt) return;
+    if (!t->alt_buf) {
+        /* 0 = no scrollback on alt; TUIs own the screen and don't want
+         * their frames to bleed into history. */
+        t->alt_buf = sp_buffer_create(sp_buffer_rows(t->buf),
+                                      sp_buffer_cols(t->buf), 0);
+        if (!t->alt_buf) return;
+    }
+    if (save_and_clear) t->alt_saved_cursor = t->cursor;
+    sp_buffer* tmp = t->buf;
+    t->buf = t->alt_buf;
+    t->alt_buf = tmp;
+    t->on_alt = true;
+    if (save_and_clear) {
+        sp_buffer_clear(t->buf, t->default_attrs);
+        t->cursor.row = 0;
+        t->cursor.col = 0;
+    }
+}
+
+void sp_terminal_alt_leave(struct sp_terminal* t, bool restore_cursor) {
+    if (!t || !t->on_alt) return;
+    sp_buffer* tmp = t->buf;
+    t->buf = t->alt_buf;
+    t->alt_buf = tmp;
+    t->on_alt = false;
+    if (restore_cursor) t->cursor = t->alt_saved_cursor;
 }
 
 void sp_terminal_clear(sp_terminal* t) {
